@@ -3,3 +3,4 @@ uvicorn[standard]
 pydantic-settings
 httpx
 pytest
+langchain-groq

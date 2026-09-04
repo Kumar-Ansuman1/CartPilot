@@ -126,3 +126,104 @@ class Quote(BaseModel):
             )
 
         return self
+
+ProductCategory = Literal[
+    "chargers",
+    "cables",
+    "power-banks",
+    "stands",
+    "cases",
+    "screen-protectors",
+    "audio",
+    "mounts",
+]
+
+CompatibilityTag = Literal[
+    "usb-c",
+    "android",
+    "iphone",
+    "iphone-15",
+    "iphone-15-and-newer",
+    "iphone-14-and-older",
+    "lightning",
+    "tablet",
+    "laptop",
+    "bluetooth",
+    "universal",
+]
+
+
+class ExtractedShoppingIntent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    search_query: str = Field(
+        min_length=3,
+        max_length=200,
+        description=(
+            "Concise product-search keywords derived from "
+            "the buyer's message."
+        ),
+    )
+
+    budget_rupees: int | None = Field(
+        description=(
+            "The buyer's stated budget in whole rupees, "
+            "or null when no budget was provided."
+        ),
+    )
+
+    requested_categories: list[ProductCategory] = Field(
+        description=(
+            "Product categories explicitly requested "
+            "or clearly implied by the buyer."
+        ),
+    )
+
+    compatibility_tags: list[CompatibilityTag] = Field(
+        description=(
+            "Known device and connector compatibility "
+            "requirements extracted from the message."
+        ),
+    )
+
+    needs_clarification: bool = Field(
+        description=(
+            "Whether essential information is missing."
+        ),
+    )
+
+    clarification_question: str | None = Field(
+        description=(
+            "One concise question for the buyer, or null "
+            "when clarification is unnecessary."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_clarification(
+        self,
+    ) -> "ExtractedShoppingIntent":
+        if self.budget_rupees is None:
+            if not self.needs_clarification:
+                raise ValueError(
+                    "A missing budget requires clarification."
+                )
+
+        if (
+            self.needs_clarification
+            and not self.clarification_question
+        ):
+            raise ValueError(
+                "A clarification question is required."
+            )
+
+        if (
+            not self.needs_clarification
+            and self.clarification_question is not None
+        ):
+            raise ValueError(
+                "Clarification question must be null when "
+                "clarification is unnecessary."
+            )
+
+        return self

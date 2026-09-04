@@ -25,6 +25,19 @@ from backend.app.payment_service import (
 )
 from backend.app.quote_store import StoredPayment
 
+from backend.app.selection_service import (
+    BaseProductUnavailableError,
+    BaseSelectionResult,
+    CatalogVersionChangedError,
+    select_base_product,
+)
+
+from backend.app.shopping_session_store import (
+    ShoppingSessionExpiredError,
+    ShoppingSessionNotFoundError,
+    ShoppingSessionStateError,
+)
+
 
 class BuyerMessageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -53,6 +66,16 @@ class PaymentVerificationRequest(BaseModel):
     )
     razorpay_signature: str = Field(
         pattern=r"^[0-9a-fA-F]{64}$"
+    )
+
+class BaseProductSelectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str = Field(
+        pattern=r"^session_[0-9a-f]{32}$"
+    )
+    base_product_sku: str = Field(
+        pattern=r"^\S{3,100}$"
     )
 
 app = FastAPI(
@@ -168,4 +191,59 @@ def verify_payment(
         raise HTTPException(
             status_code=422,
             detail="The payment response is invalid.",
+        ) from exc
+
+@app.post(
+    "/api/shop/select-base",
+    response_model=BaseSelectionResult,
+)
+def select_base(
+    request: BaseProductSelectionRequest,
+) -> BaseSelectionResult:
+    try:
+        return select_base_product(
+            session_id=request.session_id,
+            base_product_sku=request.base_product_sku,
+        )
+
+    except ShoppingSessionNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="The shopping session was not found.",
+        ) from exc
+
+    except ShoppingSessionExpiredError as exc:
+        raise HTTPException(
+            status_code=410,
+            detail=(
+                "The shopping session has expired. "
+                "Please start a new search."
+            ),
+        ) from exc
+
+    except CatalogVersionChangedError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The catalog changed after the search. "
+                "Please start a new search."
+            ),
+        ) from exc
+
+    except BaseProductUnavailableError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The selected product is no longer available. "
+                "Please start a new search."
+            ),
+        ) from exc
+
+    except ShoppingSessionStateError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The selected product cannot be used "
+                "for this shopping session."
+            ),
         ) from exc

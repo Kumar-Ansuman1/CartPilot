@@ -63,7 +63,15 @@ def test_shop_endpoint_returns_clarification():
 
     assert response.status_code == 200
     assert response.json()["status"] == "clarification_required"
-    assert response.json()["quote"] is None
+    response_data = response.json()
+
+    assert response_data["session_id"] is None
+    assert response_data["base_product_options"] == []
+    assert (
+        response_data["recommended_base_product_sku"]
+        is None
+    )
+    assert "quote" not in response_data
 
 
 def test_shop_endpoint_rejects_short_message():

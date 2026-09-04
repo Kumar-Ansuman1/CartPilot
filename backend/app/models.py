@@ -361,3 +361,45 @@ class ShoppingSession(BaseModel):
             )
 
         return self
+
+class ProductOption(BaseModel):
+    """
+    Safe product information that may be returned to the frontend.
+
+    Internal inventory counts and merchant cross-sell mappings are
+    intentionally excluded.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+    )
+
+    sku: str = Field(min_length=3)
+    name: str = Field(min_length=2)
+    description: str = Field(min_length=5)
+    category: str = Field(min_length=2)
+    price_paise: int = Field(gt=0)
+    currency: Literal["INR"] = "INR"
+    tags: list[str] = Field(default_factory=list)
+    compatibility_tags: list[str] = Field(
+        default_factory=list
+    )
+
+    @classmethod
+    def from_product(
+        cls,
+        product: Product,
+    ) -> "ProductOption":
+        return cls(
+            sku=product.sku,
+            name=product.name,
+            description=product.description,
+            category=product.category,
+            price_paise=product.price_paise,
+            currency="INR",
+            tags=list(product.tags),
+            compatibility_tags=list(
+                product.compatibility_tags
+            ),
+        )

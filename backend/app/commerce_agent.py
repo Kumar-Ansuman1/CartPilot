@@ -12,6 +12,8 @@ from backend.app.recommender import (
 )
 from backend.app.request_builder import build_shopping_request
 
+from backend.app.quote_store import save_quote
+
 
 class CommerceAgentResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -99,6 +101,7 @@ def run_commerce_agent(
             upsell_product.sku if upsell_product else None
         ),
     )
+    save_quote(quote)
 
     decision_trace.append(
         f"Quote {quote.quote_id} was created from trusted catalog prices."

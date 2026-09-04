@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     groq_api_key: SecretStr
     groq_model: str = "openai/gpt-oss-20b"
 
+    razorpay_key_id: str
+    razorpay_key_secret: SecretStr
+    razorpay_webhook_secret: SecretStr | None = None
+
 
 @lru_cache
 def get_settings() -> Settings:

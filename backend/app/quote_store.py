@@ -1,6 +1,4 @@
-import os
-import sqlite3
-from pathlib import Path
+from backend.app.database import database_connection
 from typing import Literal
 from datetime import datetime, timezone
 
@@ -9,11 +7,6 @@ from pydantic import BaseModel, ConfigDict
 from backend.app.models import Quote
 
 
-DEFAULT_DATABASE_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "data"
-    / "cartpilot.db"
-)
 
 
 class StoredQuote(BaseModel):
@@ -37,26 +30,8 @@ class StoredPayment(BaseModel):
     verified_at: datetime
 
 
-def _get_database_path() -> Path:
-    configured_path = os.getenv("CARTPILOT_DB_PATH")
-
-    if configured_path:
-        return Path(configured_path)
-
-    return DEFAULT_DATABASE_PATH
-
-
-def _connect() -> sqlite3.Connection:
-    database_path = _get_database_path()
-    database_path.parent.mkdir(parents=True, exist_ok=True)
-
-    connection = sqlite3.connect(database_path)
-    connection.execute("PRAGMA foreign_keys = ON")
-
-    return connection
-
 def initialize_quote_store() -> None:
-    with _connect() as connection:
+    with database_connection() as connection:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS quotes (
@@ -96,7 +71,7 @@ def initialize_quote_store() -> None:
 def save_quote(quote: Quote) -> StoredQuote:
     initialize_quote_store()
 
-    with _connect() as connection:
+    with database_connection() as connection:
         connection.execute(
             """
             INSERT INTO quotes (
@@ -129,7 +104,7 @@ def get_stored_quote(
 ) -> StoredQuote | None:
     initialize_quote_store()
 
-    with _connect() as connection:
+    with database_connection() as connection:
         row = connection.execute(
             """
             SELECT quote_json, status, razorpay_order_id
@@ -155,7 +130,7 @@ def mark_quote_expired(
 ) -> StoredQuote:
     initialize_quote_store()
 
-    with _connect() as connection:
+    with database_connection() as connection:
         cursor = connection.execute(
             """
             UPDATE quotes
@@ -185,7 +160,7 @@ def mark_order_created(
 ) -> StoredQuote:
     initialize_quote_store()
 
-    with _connect() as connection:
+    with database_connection() as connection:
         cursor = connection.execute(
             """
             UPDATE quotes
@@ -225,7 +200,7 @@ def get_verified_payment(
 ) -> StoredPayment | None:
     initialize_quote_store()
 
-    with _connect() as connection:
+    with database_connection() as connection:
         row = connection.execute(
             """
             SELECT
@@ -275,7 +250,7 @@ def save_verified_payment(
 
     verified_at = datetime.now(timezone.utc)
 
-    with _connect() as connection:
+    with database_connection() as connection:
         connection.execute(
             """
             INSERT OR IGNORE INTO payments (

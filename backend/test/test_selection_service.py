@@ -242,3 +242,207 @@ def test_rejects_product_that_is_no_longer_eligible(
             session_id=session.session_id,
             base_product_sku="CHG-001",
         )
+
+def prepare_base_selected_session(
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    monkeypatch.setenv(
+        "CARTPILOT_DB_PATH",
+        str(tmp_path / "cross-sell-selection.db"),
+    )
+    monkeypatch.setattr(
+        selection_service,
+        "load_catalog",
+        make_catalog,
+    )
+
+    session = create_test_session()
+
+    selection_service.select_base_product(
+        session_id=session.session_id,
+        base_product_sku="CHG-001",
+    )
+
+    return session
+
+
+def test_decline_cross_sell_creates_base_only_quote(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session = prepare_base_selected_session(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+    )
+
+    result = (
+        selection_service.finalize_cross_sell_decision(
+            session_id=session.session_id,
+            decision="decline",
+        )
+    )
+
+    assert result.status == "quote_ready"
+    assert result.cross_sell_decision == "declined"
+    assert result.quote.base_product_sku == "CHG-001"
+    assert result.quote.upsell_product_sku is None
+    assert result.quote.total_paise == 200_000
+
+    stored_session = get_shopping_session(
+        session.session_id
+    )
+
+    assert stored_session is not None
+    assert stored_session.status == "quote_created"
+    assert (
+        stored_session.quote_id
+        == result.quote.quote_id
+    )
+
+
+def test_accept_offered_cross_sell_creates_quote(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session = prepare_base_selected_session(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+    )
+
+    result = (
+        selection_service.finalize_cross_sell_decision(
+            session_id=session.session_id,
+            decision="accept",
+            cross_sell_product_sku="cbl-001",
+        )
+    )
+
+    assert result.status == "quote_ready"
+    assert result.cross_sell_decision == "accepted"
+    assert result.quote.base_product_sku == "CHG-001"
+    assert (
+        result.quote.upsell_product_sku
+        == "CBL-001"
+    )
+    assert result.quote.total_paise == 230_000
+
+
+@pytest.mark.parametrize(
+    (
+        "decision",
+        "cross_sell_product_sku",
+        "expected_message",
+    ),
+    [
+        (
+            "accept",
+            None,
+            "requires a product SKU",
+        ),
+        (
+            "decline",
+            "CBL-001",
+            "must not include a product SKU",
+        ),
+    ],
+)
+def test_requires_consistent_explicit_decision(
+    decision: str,
+    cross_sell_product_sku: str | None,
+    expected_message: str,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=expected_message,
+    ):
+        selection_service.finalize_cross_sell_decision(
+            session_id=(
+                "session_00000000000000000000000000000001"
+            ),
+            decision=decision,
+            cross_sell_product_sku=(
+                cross_sell_product_sku
+            ),
+        )
+
+
+def test_rejects_cross_sell_that_was_not_offered(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session = prepare_base_selected_session(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+    )
+
+    with pytest.raises(
+        ShoppingSessionStateError,
+        match="was not offered",
+    ):
+        selection_service.finalize_cross_sell_decision(
+            session_id=session.session_id,
+            decision="accept",
+            cross_sell_product_sku="CBL-999",
+        )
+
+
+def test_repeated_same_decision_returns_existing_quote(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session = prepare_base_selected_session(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+    )
+
+    first_result = (
+        selection_service.finalize_cross_sell_decision(
+            session_id=session.session_id,
+            decision="accept",
+            cross_sell_product_sku="CBL-001",
+        )
+    )
+
+    repeated_result = (
+        selection_service.finalize_cross_sell_decision(
+            session_id=session.session_id,
+            decision="accept",
+            cross_sell_product_sku="CBL-001",
+        )
+    )
+
+    assert (
+        repeated_result.quote
+        == first_result.quote
+    )
+    assert (
+        repeated_result.quote.quote_id
+        == first_result.quote.quote_id
+    )
+
+
+def test_cannot_change_decision_after_quote_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session = prepare_base_selected_session(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+    )
+
+    selection_service.finalize_cross_sell_decision(
+        session_id=session.session_id,
+        decision="accept",
+        cross_sell_product_sku="CBL-001",
+    )
+
+    with pytest.raises(
+        ShoppingSessionStateError,
+        match="different cross-sell decision",
+    ):
+        selection_service.finalize_cross_sell_decision(
+            session_id=session.session_id,
+            decision="decline",
+        )

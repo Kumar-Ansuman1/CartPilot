@@ -1,22 +1,26 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal
 
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    model_validator,
+)
 
 from backend.app.checkout_service import (
     CheckoutOrder,
     QuoteExpiredError,
     QuoteNotFoundError,
+    QuoteNotLinkedError,
     RazorpayOrderError,
     create_checkout_order,
 )
-
 from backend.app.commerce_agent import (
     CommerceAgentResult,
     run_commerce_agent,
 )
-
 from backend.app.payment_service import (
     InvalidPaymentSignatureError,
     PaymentQuoteNotFoundError,
@@ -24,14 +28,15 @@ from backend.app.payment_service import (
     verify_and_record_payment,
 )
 from backend.app.quote_store import StoredPayment
-
 from backend.app.selection_service import (
     BaseProductUnavailableError,
     BaseSelectionResult,
     CatalogVersionChangedError,
+    CrossSellDecisionResult,
+    SelectedProductsUnavailableError,
+    finalize_cross_sell_decision,
     select_base_product,
 )
-
 from backend.app.shopping_session_store import (
     ShoppingSessionExpiredError,
     ShoppingSessionNotFoundError,
@@ -42,15 +47,68 @@ from backend.app.shopping_session_store import (
 class BuyerMessageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    message: str = Field(min_length=3, max_length=500)
+    message: str = Field(
+        min_length=3,
+        max_length=500,
+    )
+
+
+class BaseProductSelectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str = Field(
+        pattern=r"^session_[0-9a-f]{32}$"
+    )
+    base_product_sku: str = Field(
+        pattern=r"^\S{3,100}$"
+    )
+
+
+class CrossSellDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str = Field(
+        pattern=r"^session_[0-9a-f]{32}$"
+    )
+    decision: Literal["accept", "decline"]
+    cross_sell_product_sku: str | None = Field(
+        default=None,
+        pattern=r"^\S{3,100}$",
+    )
+
+    @model_validator(mode="after")
+    def validate_decision(
+        self,
+    ) -> "CrossSellDecisionRequest":
+        if (
+            self.decision == "accept"
+            and self.cross_sell_product_sku is None
+        ):
+            raise ValueError(
+                "Accepting a cross-sell requires "
+                "a product SKU."
+            )
+
+        if (
+            self.decision == "decline"
+            and self.cross_sell_product_sku is not None
+        ):
+            raise ValueError(
+                "Declining cross-sells must not "
+                "include a product SKU."
+            )
+
+        return self
+
 
 class CheckoutConfirmationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     quote_id: str = Field(
-    pattern=r"^quote_[0-9a-f]{32}$"
+        pattern=r"^quote_[0-9a-f]{32}$"
     )
     confirmed: Literal[True]
+
 
 class PaymentVerificationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -68,19 +126,13 @@ class PaymentVerificationRequest(BaseModel):
         pattern=r"^[0-9a-fA-F]{64}$"
     )
 
-class BaseProductSelectionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    session_id: str = Field(
-        pattern=r"^session_[0-9a-f]{32}$"
-    )
-    base_product_sku: str = Field(
-        pattern=r"^\S{3,100}$"
-    )
 
 app = FastAPI(
     title="CartPilot API",
-    description="Safe agentic commerce API for electronics accessories.",
+    description=(
+        "Safe agentic commerce API for "
+        "electronics accessories."
+    ),
     version="0.1.0",
 )
 
@@ -102,96 +154,32 @@ def health() -> dict[str, str]:
     "/api/shop",
     response_model=CommerceAgentResult,
 )
-def shop(request: BuyerMessageRequest) -> CommerceAgentResult:
+def shop(
+    request: BuyerMessageRequest,
+) -> CommerceAgentResult:
     try:
-        return run_commerce_agent(request.message)
+        return run_commerce_agent(
+            request.message
+        )
 
     except RuntimeError as exc:
         raise HTTPException(
             status_code=503,
-            detail="The AI intent service is temporarily unavailable.",
+            detail=(
+                "The AI intent service is "
+                "temporarily unavailable."
+            ),
         ) from exc
 
     except ValueError as exc:
         raise HTTPException(
             status_code=422,
-            detail="The shopping request could not be processed safely.",
+            detail=(
+                "The shopping request could not "
+                "be processed safely."
+            ),
         ) from exc
 
-@app.post(
-    "/api/checkout/confirm",
-    response_model=CheckoutOrder,
-)
-def confirm_checkout(
-    request: CheckoutConfirmationRequest,
-) -> CheckoutOrder:
-    try:
-        return create_checkout_order(
-            quote_id=request.quote_id,
-        )
-
-    except QuoteNotFoundError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail="The quote was not found.",
-        ) from exc
-
-    except QuoteExpiredError as exc:
-        raise HTTPException(
-            status_code=410,
-            detail="The quote has expired. Please request a new quote.",
-        ) from exc
-
-    except RazorpayOrderError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail="The payment provider could not create the order.",
-        ) from exc
-
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail="The quote cannot be used in its current state.",
-        ) from exc
-
-@app.post(
-    "/api/payment/verify",
-    response_model=StoredPayment,
-)
-def verify_payment(
-    request: PaymentVerificationRequest,
-) -> StoredPayment:
-    try:
-        return verify_and_record_payment(
-            quote_id=request.quote_id,
-            razorpay_order_id=request.razorpay_order_id,
-            razorpay_payment_id=request.razorpay_payment_id,
-            razorpay_signature=request.razorpay_signature,
-        )
-
-    except PaymentQuoteNotFoundError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail="The payment quote was not found.",
-        ) from exc
-
-    except PaymentStateError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail="The payment does not match the stored order.",
-        ) from exc
-
-    except InvalidPaymentSignatureError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail="Payment signature verification failed.",
-        ) from exc
-
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail="The payment response is invalid.",
-        ) from exc
 
 @app.post(
     "/api/shop/select-base",
@@ -203,13 +191,17 @@ def select_base(
     try:
         return select_base_product(
             session_id=request.session_id,
-            base_product_sku=request.base_product_sku,
+            base_product_sku=(
+                request.base_product_sku
+            ),
         )
 
     except ShoppingSessionNotFoundError as exc:
         raise HTTPException(
             status_code=404,
-            detail="The shopping session was not found.",
+            detail=(
+                "The shopping session was not found."
+            ),
         ) from exc
 
     except ShoppingSessionExpiredError as exc:
@@ -234,8 +226,8 @@ def select_base(
         raise HTTPException(
             status_code=409,
             detail=(
-                "The selected product is no longer available. "
-                "Please start a new search."
+                "The selected product is no longer "
+                "available. Please start a new search."
             ),
         ) from exc
 
@@ -245,5 +237,184 @@ def select_base(
             detail=(
                 "The selected product cannot be used "
                 "for this shopping session."
+            ),
+        ) from exc
+
+
+@app.post(
+    "/api/shop/select-cross-sell",
+    response_model=CrossSellDecisionResult,
+)
+def select_cross_sell(
+    request: CrossSellDecisionRequest,
+) -> CrossSellDecisionResult:
+    try:
+        return finalize_cross_sell_decision(
+            session_id=request.session_id,
+            decision=request.decision,
+            cross_sell_product_sku=(
+                request.cross_sell_product_sku
+            ),
+        )
+
+    except ShoppingSessionNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "The shopping session was not found."
+            ),
+        ) from exc
+
+    except ShoppingSessionExpiredError as exc:
+        raise HTTPException(
+            status_code=410,
+            detail=(
+                "The shopping session has expired. "
+                "Please start a new search."
+            ),
+        ) from exc
+
+    except CatalogVersionChangedError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The catalog changed after selection. "
+                "Please start a new search."
+            ),
+        ) from exc
+
+    except SelectedProductsUnavailableError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A selected product is no longer "
+                "eligible. Please start a new search."
+            ),
+        ) from exc
+
+    except ShoppingSessionStateError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The cross-sell decision cannot be "
+                "applied to this shopping session."
+            ),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "The cross-sell decision is invalid."
+            ),
+        ) from exc
+
+
+@app.post(
+    "/api/checkout/confirm",
+    response_model=CheckoutOrder,
+)
+def confirm_checkout(
+    request: CheckoutConfirmationRequest,
+) -> CheckoutOrder:
+    try:
+        return create_checkout_order(
+            quote_id=request.quote_id,
+        )
+
+    except QuoteNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="The quote was not found.",
+        ) from exc
+
+    except QuoteNotLinkedError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The quote is not linked to a completed "
+                "shopping session."
+            ),
+        ) from exc
+
+    except QuoteExpiredError as exc:
+        raise HTTPException(
+            status_code=410,
+            detail=(
+                "The quote has expired. "
+                "Please request a new quote."
+            ),
+        ) from exc
+
+    except RazorpayOrderError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "The payment provider could not "
+                "create the order."
+            ),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The quote cannot be used "
+                "in its current state."
+            ),
+        ) from exc
+
+
+@app.post(
+    "/api/payment/verify",
+    response_model=StoredPayment,
+)
+def verify_payment(
+    request: PaymentVerificationRequest,
+) -> StoredPayment:
+    try:
+        return verify_and_record_payment(
+            quote_id=request.quote_id,
+            razorpay_order_id=(
+                request.razorpay_order_id
+            ),
+            razorpay_payment_id=(
+                request.razorpay_payment_id
+            ),
+            razorpay_signature=(
+                request.razorpay_signature
+            ),
+        )
+
+    except PaymentQuoteNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "The payment quote was not found."
+            ),
+        ) from exc
+
+    except PaymentStateError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The payment does not match "
+                "the stored order."
+            ),
+        ) from exc
+
+    except InvalidPaymentSignatureError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Payment signature verification failed."
+            ),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "The payment response is invalid."
             ),
         ) from exc

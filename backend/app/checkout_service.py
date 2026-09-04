@@ -11,6 +11,9 @@ from backend.app.quote_store import (
     mark_order_created,
     mark_quote_expired,
 )
+from backend.app.shopping_session_store import (
+    get_shopping_session_by_quote_id,
+)
 
 
 class CheckoutServiceError(Exception):
@@ -18,6 +21,10 @@ class CheckoutServiceError(Exception):
 
 
 class QuoteNotFoundError(CheckoutServiceError):
+    pass
+
+
+class QuoteNotLinkedError(CheckoutServiceError):
     pass
 
 
@@ -40,7 +47,8 @@ class CheckoutOrder(BaseModel):
     status: Literal["created"]
 
 
-# Prevents simultaneous duplicate confirmations in our single-process demo.
+# Prevents simultaneous duplicate confirmations in the
+# current single-process demo.
 _checkout_lock = Lock()
 
 
@@ -78,18 +86,42 @@ def create_checkout_order(
     cleaned_quote_id = quote_id.strip()
 
     if not cleaned_quote_id:
-        raise ValueError("Quote ID is required.")
+        raise ValueError(
+            "Quote ID is required."
+        )
 
     with _checkout_lock:
-        stored_quote = get_stored_quote(cleaned_quote_id)
+        stored_quote = get_stored_quote(
+            cleaned_quote_id
+        )
 
         if stored_quote is None:
-            raise QuoteNotFoundError("Quote was not found.")
+            raise QuoteNotFoundError(
+                "Quote was not found."
+            )
+
+        shopping_session = (
+            get_shopping_session_by_quote_id(
+                cleaned_quote_id
+            )
+        )
+
+        if (
+            shopping_session is None
+            or shopping_session.status
+            != "quote_created"
+            or shopping_session.quote_id
+            != cleaned_quote_id
+        ):
+            raise QuoteNotLinkedError(
+                "Quote is not linked to a completed "
+                "shopping session."
+            )
 
         quote = stored_quote.quote
 
-        # Idempotent retry: return the existing order instead of
-        # creating another Razorpay order.
+        # Idempotent retry: return the existing order
+        # instead of creating another Razorpay order.
         if stored_quote.status == "order_created":
             if stored_quote.razorpay_order_id is None:
                 raise RazorpayOrderError(
@@ -98,18 +130,26 @@ def create_checkout_order(
 
             return _build_checkout_result(
                 quote_id=quote.quote_id,
-                razorpay_order_id=stored_quote.razorpay_order_id,
+                razorpay_order_id=(
+                    stored_quote.razorpay_order_id
+                ),
                 amount_paise=quote.total_paise,
             )
 
         if stored_quote.status == "expired":
-            raise QuoteExpiredError("Quote has expired.")
+            raise QuoteExpiredError(
+                "Quote has expired."
+            )
 
         now = datetime.now(timezone.utc)
 
         if now >= quote.expires_at:
-            mark_quote_expired(quote.quote_id)
-            raise QuoteExpiredError("Quote has expired.")
+            mark_quote_expired(
+                quote.quote_id
+            )
+            raise QuoteExpiredError(
+                "Quote has expired."
+            )
 
         payload = {
             "amount": quote.total_paise,
@@ -118,17 +158,23 @@ def create_checkout_order(
             "partial_payment": False,
             "notes": {
                 "quote_id": quote.quote_id,
-                "catalog_version": quote.catalog_version,
-                "base_product_sku": quote.base_product_sku,
+                "catalog_version": (
+                    quote.catalog_version
+                ),
+                "base_product_sku": (
+                    quote.base_product_sku
+                ),
                 "upsell_product_sku": (
-                    quote.upsell_product_sku or "none"
+                    quote.upsell_product_sku
+                    or "none"
                 ),
             },
         }
 
         try:
-            response = _create_razorpay_client().order.create(
-                payload
+            response = (
+                _create_razorpay_client()
+                .order.create(payload)
             )
         except Exception as exc:
             raise RazorpayOrderError(
@@ -144,30 +190,42 @@ def create_checkout_order(
 
         if (
             not isinstance(razorpay_order_id, str)
-            or not razorpay_order_id.startswith("order_")
+            or not razorpay_order_id.startswith(
+                "order_"
+            )
         ):
             raise RazorpayOrderError(
                 "Razorpay returned an invalid order ID."
             )
 
-        if response.get("amount") != quote.total_paise:
+        if (
+            response.get("amount")
+            != quote.total_paise
+        ):
             raise RazorpayOrderError(
                 "Razorpay returned an unexpected amount."
             )
 
-        if response.get("currency") != quote.currency:
+        if (
+            response.get("currency")
+            != quote.currency
+        ):
             raise RazorpayOrderError(
                 "Razorpay returned an unexpected currency."
             )
 
-        if response.get("receipt") != quote.quote_id:
+        if (
+            response.get("receipt")
+            != quote.quote_id
+        ):
             raise RazorpayOrderError(
                 "Razorpay returned an unexpected receipt."
             )
 
         if response.get("status") != "created":
             raise RazorpayOrderError(
-                "Razorpay order was not created successfully."
+                "Razorpay order was not "
+                "created successfully."
             )
 
         mark_order_created(

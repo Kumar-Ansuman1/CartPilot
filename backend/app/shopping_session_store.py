@@ -232,6 +232,33 @@ def get_shopping_session(
 
     return session
 
+def get_shopping_session_by_quote_id(
+    quote_id: str,
+) -> ShoppingSession | None:
+    cleaned_quote_id = quote_id.strip()
+
+    if not cleaned_quote_id:
+        raise ValueError(
+            "Quote ID is required."
+        )
+
+    initialize_shopping_session_store()
+
+    with database_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT session_id
+            FROM shopping_sessions
+            WHERE quote_id = ?
+            """,
+            (cleaned_quote_id,),
+        ).fetchone()
+
+    if row is None:
+        return None
+
+    return get_shopping_session(row[0])
+
 
 def mark_shopping_session_expired(
     session_id: str,

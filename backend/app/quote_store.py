@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict
 
 from backend.app.models import Quote
 
-
+from sqlite3 import IntegrityError
 
 
 class StoredQuote(BaseModel):
@@ -28,6 +28,31 @@ class StoredPayment(BaseModel):
     razorpay_payment_id: str
     status: Literal["verified"]
     verified_at: datetime
+
+class QuoteConflictError(Exception):
+    pass
+
+
+def _quote_terms(
+    quote: Quote,
+) -> tuple[
+    str,
+    str,
+    str,
+    int,
+    str | None,
+    int,
+    int,
+]:
+    return (
+        quote.catalog_version,
+        quote.currency,
+        quote.base_product_sku,
+        quote.base_price_paise,
+        quote.upsell_product_sku,
+        quote.upsell_price_paise,
+        quote.total_paise,
+    )
 
 
 def initialize_quote_store() -> None:
@@ -124,6 +149,30 @@ def get_stored_quote(
         status=status,
         razorpay_order_id=razorpay_order_id,
     )
+
+def save_quote_idempotently(
+    quote: Quote,
+) -> StoredQuote:
+    try:
+        return save_quote(quote)
+    except IntegrityError as exc:
+        stored_quote = get_stored_quote(
+            quote.quote_id
+        )
+
+        if stored_quote is None:
+            raise
+
+        if (
+            _quote_terms(stored_quote.quote)
+            != _quote_terms(quote)
+        ):
+            raise QuoteConflictError(
+                "A different quote already exists "
+                "for this shopping session."
+            ) from exc
+
+        return stored_quote
 
 def mark_quote_expired(
     quote_id: str,

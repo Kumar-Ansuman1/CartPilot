@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/ai-buyer-frontend
+      - feature/ai-buyer-cross-sell
   workflow_dispatch:
 
 permissions:

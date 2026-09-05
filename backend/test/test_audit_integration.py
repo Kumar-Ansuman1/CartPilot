@@ -263,3 +263,147 @@ def test_rejected_base_selection_is_audited(
         "BASE_PRODUCT_NOT_OFFERED"
     )
     assert events[0].sku is None
+
+
+def prepare_base_selection(
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    database_name: str,
+):
+    configure_database(
+        monkeypatch,
+        tmp_path,
+        database_name,
+    )
+    monkeypatch.setattr(
+        selection_service,
+        "load_catalog",
+        make_catalog,
+    )
+    session = create_test_session()
+
+    selection_service.select_base_product(
+        session_id=session.session_id,
+        base_product_sku="CHG-001",
+    )
+
+    return session
+
+
+def test_declined_cross_sell_and_quote_are_audited(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session = prepare_base_selection(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        database_name="declined-cross-sell-audit.db",
+    )
+
+    result = (
+        selection_service.finalize_cross_sell_decision(
+            session_id=session.session_id,
+            decision="decline",
+        )
+    )
+
+    events = list_audit_events(session.session_id)
+    decision_event, quote_event = events[-2:]
+
+    assert decision_event.event_type == (
+        "cross_sell_decided"
+    )
+    assert decision_event.reason_code == (
+        "BUYER_DECLINED_CROSS_SELL"
+    )
+    assert decision_event.sku is None
+    assert decision_event.quote_id == (
+        result.quote.quote_id
+    )
+
+    assert quote_event.event_type == "quote_created"
+    assert quote_event.reason_code == (
+        "IMMUTABLE_QUOTE_STORED"
+    )
+    assert quote_event.amount_paise == 100_000
+    assert quote_event.quote_id == result.quote.quote_id
+
+
+def test_accepted_cross_sell_retry_is_audited_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session = prepare_base_selection(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        database_name="accepted-cross-sell-audit.db",
+    )
+
+    first_result = (
+        selection_service.finalize_cross_sell_decision(
+            session_id=session.session_id,
+            decision="accept",
+            cross_sell_product_sku="CBL-001",
+        )
+    )
+    first_events = list_audit_events(
+        session.session_id
+    )
+
+    repeated_result = (
+        selection_service.finalize_cross_sell_decision(
+            session_id=session.session_id,
+            decision="accept",
+            cross_sell_product_sku="CBL-001",
+        )
+    )
+    repeated_events = list_audit_events(
+        session.session_id
+    )
+
+    assert repeated_result.quote == first_result.quote
+    assert repeated_events == first_events
+
+    decision_event, quote_event = first_events[-2:]
+
+    assert decision_event.reason_code == (
+        "BUYER_ACCEPTED_CROSS_SELL"
+    )
+    assert decision_event.sku == "CBL-001"
+    assert decision_event.amount_paise == 30_000
+    assert quote_event.amount_paise == 130_000
+
+
+def test_unoffered_cross_sell_rejection_is_audited(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session = prepare_base_selection(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        database_name="rejected-cross-sell-audit.db",
+    )
+
+    with pytest.raises(
+        ShoppingSessionStateError,
+        match="was not offered",
+    ):
+        selection_service.finalize_cross_sell_decision(
+            session_id=session.session_id,
+            decision="accept",
+            cross_sell_product_sku="CBL-999",
+        )
+
+    rejection_event = list_audit_events(
+        session.session_id
+    )[-1]
+
+    assert rejection_event.event_type == (
+        "cross_sell_decided"
+    )
+    assert rejection_event.outcome == "rejected"
+    assert rejection_event.reason_code == (
+        "CROSS_SELL_PRODUCT_NOT_OFFERED"
+    )
+    assert rejection_event.sku is None

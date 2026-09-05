@@ -133,6 +133,94 @@ def _record_base_selection_events(
         )
 
 
+def _record_rejected_cross_sell_decision(
+    *,
+    session_id: str,
+    decision_subject: str,
+    reason_code: str,
+    explanation: str,
+) -> None:
+    record_audit_event(
+        session_id=session_id,
+        event_type="cross_sell_decided",
+        subject=(
+            "rejected:"
+            f"{decision_subject}:{reason_code}"
+        ),
+        actor="buyer",
+        outcome="rejected",
+        reason_code=reason_code,
+        explanation=explanation,
+    )
+
+
+def _record_cross_sell_and_quote_events(
+    *,
+    session_id: str,
+    quote: Quote,
+) -> None:
+    accepted_cross_sell = (
+        quote.upsell_product_sku is not None
+    )
+    decision_subject = (
+        f"accepted:{quote.upsell_product_sku}"
+        if accepted_cross_sell
+        else "declined"
+    )
+
+    record_audit_event(
+        session_id=session_id,
+        quote_id=quote.quote_id,
+        event_type="cross_sell_decided",
+        subject=decision_subject,
+        actor="buyer",
+        outcome="recorded",
+        reason_code=(
+            "BUYER_ACCEPTED_CROSS_SELL"
+            if accepted_cross_sell
+            else "BUYER_DECLINED_CROSS_SELL"
+        ),
+        explanation=(
+            "The buyer explicitly accepted an offered "
+            "cross-sell product."
+            if accepted_cross_sell
+            else (
+                "The buyer explicitly declined every "
+                "offered cross-sell product."
+            )
+        ),
+        sku=quote.upsell_product_sku,
+        amount_paise=(
+            quote.upsell_price_paise
+            if accepted_cross_sell
+            else None
+        ),
+        currency=(
+            quote.currency
+            if accepted_cross_sell
+            else None
+        ),
+    )
+
+    record_audit_event(
+        session_id=session_id,
+        quote_id=quote.quote_id,
+        event_type="quote_created",
+        subject=f"quote:{quote.quote_id}",
+        actor="deterministic_core",
+        outcome="recorded",
+        reason_code="IMMUTABLE_QUOTE_STORED",
+        explanation=(
+            "The deterministic core revalidated the "
+            "selected products and stored an immutable "
+            "quote. No order or payment was created."
+        ),
+        sku=quote.base_product_sku,
+        amount_paise=quote.total_paise,
+        currency=quote.currency,
+    )
+
+
 class BaseSelectionResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -502,6 +590,10 @@ def finalize_cross_sell_decision(
             ),
         )
     )
+    decision_subject = (
+        selected_cross_sell_sku
+        or "declined"
+    )
 
     session = get_shopping_session(session_id)
 
@@ -511,6 +603,15 @@ def finalize_cross_sell_decision(
         )
 
     if session.status == "expired":
+        _record_rejected_cross_sell_decision(
+            session_id=session.session_id,
+            decision_subject=decision_subject,
+            reason_code="SHOPPING_SESSION_EXPIRED",
+            explanation=(
+                "The cross-sell decision was rejected "
+                "because the shopping session had expired."
+            ),
+        )
         raise ShoppingSessionExpiredError(
             "Shopping session has expired."
         )
@@ -536,12 +637,32 @@ def finalize_cross_sell_decision(
             stored_quote.quote.upsell_product_sku
             != selected_cross_sell_sku
         ):
+            _record_rejected_cross_sell_decision(
+                session_id=session.session_id,
+                decision_subject=decision_subject,
+                reason_code="CROSS_SELL_DECISION_CONFLICT",
+                explanation=(
+                    "The cross-sell decision was rejected "
+                    "because a different decision had "
+                    "already been finalized."
+                ),
+            )
             raise ShoppingSessionStateError(
                 "A different cross-sell decision "
                 "was already finalized."
             )
 
         if stored_quote.status != "pending":
+            _record_rejected_cross_sell_decision(
+                session_id=session.session_id,
+                decision_subject=decision_subject,
+                reason_code="QUOTE_ALREADY_ADVANCED",
+                explanation=(
+                    "The cross-sell decision was rejected "
+                    "because its quote had already advanced "
+                    "beyond review."
+                ),
+            )
             raise ShoppingSessionStateError(
                 "The existing quote has already "
                 "advanced beyond review."
@@ -551,9 +672,35 @@ def finalize_cross_sell_decision(
             datetime.now(timezone.utc)
             >= stored_quote.quote.expires_at
         ):
+            record_audit_event(
+                session_id=session.session_id,
+                quote_id=stored_quote.quote.quote_id,
+                event_type="quote_expired",
+                subject=(
+                    "quote-expired:"
+                    f"{stored_quote.quote.quote_id}"
+                ),
+                actor="deterministic_core",
+                outcome="recorded",
+                reason_code="QUOTE_TIME_LIMIT_REACHED",
+                explanation=(
+                    "The stored quote reached its expiry "
+                    "time and could no longer authorize "
+                    "checkout."
+                ),
+                amount_paise=(
+                    stored_quote.quote.total_paise
+                ),
+                currency=stored_quote.quote.currency,
+            )
             raise ShoppingSessionStateError(
                 "The existing quote has expired."
             )
+
+        _record_cross_sell_and_quote_events(
+            session_id=session.session_id,
+            quote=stored_quote.quote,
+        )
 
         return _build_quote_ready_result(
             session_id=session.session_id,
@@ -569,6 +716,29 @@ def finalize_cross_sell_decision(
             session.session_id
         )
 
+        record_audit_event(
+            session_id=session.session_id,
+            event_type="session_expired",
+            subject="session-expired",
+            actor="deterministic_core",
+            outcome="recorded",
+            reason_code="SESSION_TIME_LIMIT_REACHED",
+            explanation=(
+                "The shopping session reached its expiry "
+                "time before a quote was created."
+            ),
+        )
+
+        _record_rejected_cross_sell_decision(
+            session_id=session.session_id,
+            decision_subject=decision_subject,
+            reason_code="SHOPPING_SESSION_EXPIRED",
+            explanation=(
+                "The cross-sell decision was rejected "
+                "because the shopping session had expired."
+            ),
+        )
+
         raise ShoppingSessionExpiredError(
             "Shopping session has expired."
         )
@@ -577,6 +747,15 @@ def finalize_cross_sell_decision(
         session.status
         != "awaiting_cross_sell_decision"
     ):
+        _record_rejected_cross_sell_decision(
+            session_id=session.session_id,
+            decision_subject=decision_subject,
+            reason_code="CROSS_SELL_DECISION_NOT_EXPECTED",
+            explanation=(
+                "The cross-sell decision was rejected "
+                "because the session was not awaiting it."
+            ),
+        )
         raise ShoppingSessionStateError(
             "A base product must be selected before "
             "the cross-sell decision."
@@ -593,6 +772,16 @@ def finalize_cross_sell_decision(
         and selected_cross_sell_sku
         not in session.cross_sell_option_skus
     ):
+        _record_rejected_cross_sell_decision(
+            session_id=session.session_id,
+            decision_subject=decision_subject,
+            reason_code="CROSS_SELL_PRODUCT_NOT_OFFERED",
+            explanation=(
+                "The cross-sell decision was rejected "
+                "because the product was not offered in "
+                "this shopping session."
+            ),
+        )
         raise ShoppingSessionStateError(
             "Selected cross-sell product was not offered "
             "for this shopping session."
@@ -604,6 +793,16 @@ def finalize_cross_sell_decision(
         catalog.catalog_version
         != session.catalog_version
     ):
+        _record_rejected_cross_sell_decision(
+            session_id=session.session_id,
+            decision_subject=decision_subject,
+            reason_code="CATALOG_VERSION_CHANGED",
+            explanation=(
+                "The cross-sell decision was rejected "
+                "because the trusted catalog changed "
+                "after the products were offered."
+            ),
+        )
         raise CatalogVersionChangedError(
             "The catalog changed after the products "
             "were offered. Start a new shopping request."
@@ -622,6 +821,16 @@ def finalize_cross_sell_decision(
             session_id=session.session_id,
         )
     except ValueError as exc:
+        _record_rejected_cross_sell_decision(
+            session_id=session.session_id,
+            decision_subject=decision_subject,
+            reason_code="SELECTED_PRODUCTS_UNAVAILABLE",
+            explanation=(
+                "The cross-sell decision was rejected "
+                "because the selected products no longer "
+                "passed deterministic validation."
+            ),
+        )
         raise SelectedProductsUnavailableError(
             str(exc)
         ) from exc
@@ -631,11 +840,37 @@ def finalize_cross_sell_decision(
             quote
         )
     except QuoteConflictError as exc:
+        record_audit_event(
+            session_id=session.session_id,
+            quote_id=quote.quote_id,
+            event_type="quote_created",
+            subject=f"quote-conflict:{quote.quote_id}",
+            actor="deterministic_core",
+            outcome="failed",
+            reason_code="QUOTE_ID_CONFLICT",
+            explanation=(
+                "Quote creation failed because the quote "
+                "identifier was already linked to different "
+                "terms."
+            ),
+            amount_paise=quote.total_paise,
+            currency=quote.currency,
+        )
         raise ShoppingSessionStateError(
             str(exc)
         ) from exc
 
     if stored_quote.status != "pending":
+        _record_rejected_cross_sell_decision(
+            session_id=session.session_id,
+            decision_subject=decision_subject,
+            reason_code="QUOTE_ALREADY_ADVANCED",
+            explanation=(
+                "The cross-sell decision was rejected "
+                "because its quote had already advanced "
+                "beyond review."
+            ),
+        )
         raise ShoppingSessionStateError(
             "The existing quote has already "
             "advanced beyond review."
@@ -644,6 +879,11 @@ def finalize_cross_sell_decision(
     updated_session = mark_shopping_session_quoted(
         session_id=session.session_id,
         quote_id=stored_quote.quote.quote_id,
+    )
+
+    _record_cross_sell_and_quote_events(
+        session_id=updated_session.session_id,
+        quote=stored_quote.quote,
     )
 
     return _build_quote_ready_result(

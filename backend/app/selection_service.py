@@ -7,6 +7,7 @@ from pydantic import (
     Field,
 )
 
+from backend.app.audit_events import record_audit_event
 from backend.app.catalog import load_catalog
 from backend.app.models import ProductOption, Quote
 from backend.app.quote_service import create_quote
@@ -48,6 +49,88 @@ class BaseProductUnavailableError(
 
 class SelectedProductsUnavailableError(Exception):
     pass
+
+
+def _record_rejected_base_selection(
+    *,
+    session_id: str,
+    attempted_sku: str,
+    reason_code: str,
+    explanation: str,
+) -> None:
+    record_audit_event(
+        session_id=session_id,
+        event_type="base_product_selected",
+        subject=(
+            f"rejected:{attempted_sku}:{reason_code}"
+        ),
+        actor="buyer",
+        outcome="rejected",
+        reason_code=reason_code,
+        explanation=explanation,
+    )
+
+
+def _record_base_selection_events(
+    *,
+    session_id: str,
+    selected_product: ProductOption,
+    cross_sell_products: list[ProductOption],
+) -> None:
+    record_audit_event(
+        session_id=session_id,
+        event_type="base_product_selected",
+        subject=(
+            f"accepted:{selected_product.sku}"
+        ),
+        actor="buyer",
+        outcome="recorded",
+        reason_code="BUYER_SELECTED_OFFERED_PRODUCT",
+        explanation=(
+            "The buyer explicitly selected a product "
+            "that the deterministic core had offered."
+        ),
+        sku=selected_product.sku,
+        amount_paise=selected_product.price_paise,
+        currency=selected_product.currency,
+    )
+
+    record_audit_event(
+        session_id=session_id,
+        event_type="cross_sell_evaluated",
+        subject=(
+            f"cross-sell-evaluation:{selected_product.sku}"
+        ),
+        actor="deterministic_core",
+        outcome="recorded",
+        reason_code="CROSS_SELL_POLICY_EVALUATED",
+        explanation=(
+            f"{len(cross_sell_products)} optional "
+            "cross-sell product(s) passed the trusted "
+            "catalog and spending-limit rules."
+        ),
+    )
+
+    for product in cross_sell_products:
+        record_audit_event(
+            session_id=session_id,
+            event_type="cross_sell_product_offered",
+            subject=(
+                "cross-sell-offer:"
+                f"{selected_product.sku}:{product.sku}"
+            ),
+            actor="deterministic_core",
+            outcome="allowed",
+            reason_code="ELIGIBLE_CROSS_SELL_OPTION",
+            explanation=(
+                "The optional product passed stock, "
+                "compatibility, remaining-budget and "
+                "cross-sell percentage checks."
+            ),
+            sku=product.sku,
+            amount_paise=product.price_paise,
+            currency=product.currency,
+        )
 
 
 class BaseSelectionResult(BaseModel):
@@ -220,11 +303,29 @@ def select_base_product(
         )
 
     if session.status == "expired":
+        _record_rejected_base_selection(
+            session_id=session.session_id,
+            attempted_sku=cleaned_base_sku,
+            reason_code="SHOPPING_SESSION_EXPIRED",
+            explanation=(
+                "The product selection was rejected "
+                "because the shopping session had expired."
+            ),
+        )
         raise ShoppingSessionExpiredError(
             "Shopping session has expired."
         )
 
     if session.status == "quote_created":
+        _record_rejected_base_selection(
+            session_id=session.session_id,
+            attempted_sku=cleaned_base_sku,
+            reason_code="QUOTE_ALREADY_CREATED",
+            explanation=(
+                "The product selection was rejected because "
+                "the shopping session already had a quote."
+            ),
+        )
         raise ShoppingSessionStateError(
             "This shopping session already has a quote."
         )
@@ -235,11 +336,30 @@ def select_base_product(
         and session.selected_base_product_sku
         != cleaned_base_sku
     ):
+        _record_rejected_base_selection(
+            session_id=session.session_id,
+            attempted_sku=cleaned_base_sku,
+            reason_code="BASE_PRODUCT_ALREADY_SELECTED",
+            explanation=(
+                "The product selection was rejected because "
+                "a different base product had already been "
+                "selected."
+            ),
+        )
         raise ShoppingSessionStateError(
             "A different base product was already selected."
         )
 
     if cleaned_base_sku not in session.base_product_skus:
+        _record_rejected_base_selection(
+            session_id=session.session_id,
+            attempted_sku=cleaned_base_sku,
+            reason_code="BASE_PRODUCT_NOT_OFFERED",
+            explanation=(
+                "The product selection was rejected because "
+                "the SKU was not offered in this session."
+            ),
+        )
         raise ShoppingSessionStateError(
             "Selected base product was not offered "
             "for this shopping session."
@@ -251,6 +371,15 @@ def select_base_product(
         catalog.catalog_version
         != session.catalog_version
     ):
+        _record_rejected_base_selection(
+            session_id=session.session_id,
+            attempted_sku=cleaned_base_sku,
+            reason_code="CATALOG_VERSION_CHANGED",
+            explanation=(
+                "The product selection was rejected because "
+                "the trusted catalog changed after the offer."
+            ),
+        )
         raise CatalogVersionChangedError(
             "The catalog changed after the products "
             "were offered. Start a new shopping request."
@@ -272,6 +401,16 @@ def select_base_product(
     )
 
     if selected_product is None:
+        _record_rejected_base_selection(
+            session_id=session.session_id,
+            attempted_sku=cleaned_base_sku,
+            reason_code="BASE_PRODUCT_NO_LONGER_ELIGIBLE",
+            explanation=(
+                "The product selection was rejected because "
+                "the SKU no longer passed the current stock, "
+                "budget or compatibility checks."
+            ),
+        )
         raise BaseProductUnavailableError(
             "The selected product is no longer eligible."
         )
@@ -292,6 +431,22 @@ def select_base_product(
             product.sku
             for product in cross_sell_products
         ],
+    )
+
+    selected_product_option = (
+        ProductOption.from_product(
+            selected_product
+        )
+    )
+    cross_sell_options = [
+        ProductOption.from_product(product)
+        for product in cross_sell_products
+    ]
+
+    _record_base_selection_events(
+        session_id=updated_session.session_id,
+        selected_product=selected_product_option,
+        cross_sell_products=cross_sell_options,
     )
 
     decision_trace = [
@@ -327,15 +482,8 @@ def select_base_product(
         session_expires_at=(
             updated_session.expires_at
         ),
-        selected_base_product=(
-            ProductOption.from_product(
-                selected_product
-            )
-        ),
-        cross_sell_options=[
-            ProductOption.from_product(product)
-            for product in cross_sell_products
-        ],
+        selected_base_product=selected_product_option,
+        cross_sell_options=cross_sell_options,
         decision_trace=decision_trace,
     )
 

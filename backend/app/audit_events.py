@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from hashlib import sha256
 from typing import Literal
 from uuid import uuid4
 
@@ -23,9 +24,10 @@ AuditActor = Literal[
 AuditEventType = Literal[
     "intent_extracted",
     "catalog_searched",
-    "base_options_offered",
+    "base_product_offered",
     "base_product_selected",
-    "cross_sell_options_offered",
+    "cross_sell_evaluated",
+    "cross_sell_product_offered",
     "cross_sell_decided",
     "quote_created",
     "quote_expired",
@@ -135,6 +137,26 @@ class AuditEvent(BaseModel):
 
 class AuditEventConflictError(Exception):
     pass
+
+
+def deterministic_audit_event_id(
+    *,
+    session_id: str,
+    event_type: AuditEventType,
+    subject: str,
+) -> str:
+    event_key = "\x1f".join(
+        (
+            session_id,
+            event_type,
+            subject,
+        )
+    )
+    digest = sha256(
+        event_key.encode("utf-8")
+    ).hexdigest()
+
+    return f"audit_{digest[:32]}"
 
 
 def new_audit_event(
@@ -271,13 +293,66 @@ def save_audit_event_idempotently(
 
     existing_event = get_audit_event(event.event_id)
 
-    if existing_event == event:
+    if (
+        existing_event is not None
+        and _audit_event_terms(existing_event)
+        == _audit_event_terms(event)
+    ):
         return existing_event
 
     raise AuditEventConflictError(
         "A different audit event already exists "
         "with this event ID."
     )
+
+
+def _audit_event_terms(
+    event: AuditEvent,
+) -> dict[str, object]:
+    return event.model_dump(
+        exclude={"created_at"}
+    )
+
+
+def record_audit_event(
+    *,
+    session_id: str,
+    event_type: AuditEventType,
+    subject: str,
+    actor: AuditActor,
+    outcome: AuditOutcome,
+    reason_code: str,
+    explanation: str,
+    quote_id: str | None = None,
+    sku: str | None = None,
+    amount_paise: int | None = None,
+    currency: Literal["INR"] | None = None,
+    razorpay_order_id: str | None = None,
+    razorpay_payment_id: str | None = None,
+    created_at: datetime | None = None,
+) -> AuditEvent:
+    event = new_audit_event(
+        event_id=deterministic_audit_event_id(
+            session_id=session_id,
+            event_type=event_type,
+            subject=subject,
+        ),
+        session_id=session_id,
+        quote_id=quote_id,
+        event_type=event_type,
+        actor=actor,
+        outcome=outcome,
+        reason_code=reason_code,
+        explanation=explanation,
+        sku=sku,
+        amount_paise=amount_paise,
+        currency=currency,
+        razorpay_order_id=razorpay_order_id,
+        razorpay_payment_id=razorpay_payment_id,
+        created_at=created_at,
+    )
+
+    return save_audit_event_idempotently(event)
 
 
 def list_audit_events(

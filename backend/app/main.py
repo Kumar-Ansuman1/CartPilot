@@ -1,6 +1,7 @@
-from typing import Literal
+from sqlite3 import Error as SQLiteError
+from typing import Annotated, Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Path, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import (
     BaseModel,
@@ -9,6 +10,7 @@ from pydantic import (
     model_validator,
 )
 
+from backend.app.audit_events import AuditEvent, list_audit_events
 from backend.app.checkout_service import (
     CheckoutOrder,
     QuoteExpiredError,
@@ -41,7 +43,21 @@ from backend.app.shopping_session_store import (
     ShoppingSessionExpiredError,
     ShoppingSessionNotFoundError,
     ShoppingSessionStateError,
+    get_shopping_session,
 )
+
+
+class ShoppingSessionAuditResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str = Field(
+        pattern=r"^session_[0-9a-f]{32}$"
+    )
+    quote_id: str | None = Field(
+        default=None,
+        pattern=r"^quote_[0-9a-f]{32}$",
+    )
+    events: list[AuditEvent]
 
 
 class BuyerMessageRequest(BaseModel):
@@ -179,6 +195,47 @@ def shop(
                 "be processed safely."
             ),
         ) from exc
+
+
+@app.get(
+    "/api/shop/{session_id}/audit",
+    response_model=ShoppingSessionAuditResponse,
+    summary="Read a shopping session's audit timeline",
+)
+def get_shopping_audit(
+    session_id: Annotated[
+        str, Path(pattern=r"^session_[0-9a-f]{32}$")
+    ],
+    response: Response,
+) -> ShoppingSessionAuditResponse:
+    """Return stored events in insertion order, including expired sessions.
+
+    The session ID is the lookup key in the current anonymous demo.
+    Account ownership checks must accompany any future authenticated flow.
+    Reading history does not expire sessions or trigger commerce actions.
+    """
+    try:
+        session = get_shopping_session(session_id)
+
+        if session is None:
+            raise HTTPException(
+                status_code=404,
+                detail="The shopping session was not found.",
+            )
+
+        timeline = ShoppingSessionAuditResponse(
+            session_id=session.session_id,
+            quote_id=session.quote_id,
+            events=list_audit_events(session.session_id),
+        )
+    except (SQLiteError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="The audit timeline is temporarily unavailable.",
+        ) from exc
+
+    response.headers["Cache-Control"] = "no-store"
+    return timeline
 
 
 @app.post(

@@ -1,224 +1,416 @@
 # CartPilot Architecture
 
-This document describes CartPilot as it exists on `main`: a local, single-process, Razorpay Test Mode demonstration of buyer-controlled agentic commerce for VoltCart.
+This document describes CartPilot as it exists on `main`: a buyer-controlled, Razorpay Test Mode agentic-commerce system with two interaction modes:
+
+1. a normal shopping assistant where the buyer chooses products, and
+2. a delegated AI buyer that may choose products only inside an immutable buyer-approved purchase mandate.
 
 ## Architectural rule
 
-> **AI understands language. Deterministic code controls commerce. The buyer explicitly gates every money-related transition.**
+> **AI may interpret and choose within bounded authority. Deterministic code controls commerce. The buyer still gates payment.**
 
-The language model may extract a query, budget, category, and compatibility requirements. It does not receive authority to choose a SKU, set a price, declare stock, create a quote, create an order, or verify a payment.
+The language model may:
 
-Structured output reduces malformed model responses, but it does not make model interpretation infallible. The safety design therefore combines schema validation, a trusted catalog, deterministic eligibility rules, buyer-visible choices, explicit decisions, server-stored state, and payment-provider signature verification.
+- extract shopping intent in the normal flow,
+- rank/select only from a deterministic eligible SKU set in delegated mode,
+- explain its choice.
+
+It may not:
+
+- invent a SKU,
+- set price or stock,
+- modify a purchase mandate,
+- bypass catalog or compatibility checks,
+- create a Razorpay order without buyer confirmation,
+- verify or declare payment success.
+
+Structured output reduces malformed model responses, but safety comes from combining schema validation, a trusted catalog, deterministic eligibility rules, immutable mandates, append-only execution state, server-stored quotes, explicit buyer checkout confirmation, payment-provider signature verification, signed webhook recovery, and persistent audit events.
 
 ## System context
 
 ```mermaid
 flowchart TD
     Buyer[Buyer] --> UI[React + Vite]
-    UI --> API[FastAPI API]
-    API --> Intent[Groq intent adapter]
-    API --> Core[Deterministic commerce core]
-    Core --> Catalog[Versioned JSON catalog]
-    Core --> DB[(SQLite state)]
+    Buyer --> Mandate[Immutable Purchase Mandate]
+
+    UI --> API[FastAPI Core API]
+    API --> Intent[Groq Intent Adapter]
+    API --> Core[Deterministic Commerce Core]
+    Core --> Catalog[Versioned JSON Catalog]
+    Core --> DB[(SQLite State)]
+
+    Mandate --> Exec[Mandate Execution Ledger]
+    Exec --> Delegated[Delegated AI Buyer]
+    Core --> Delegated
+    Delegated --> Core
+
     API --> Razorpay[Razorpay Test Mode]
     Razorpay --> UI
-    UI --> API
+    Razorpay --> Webhook[Signed Webhook]
+    Webhook --> API
 ```
 
-### Trust zones
+## Trust zones
 
 | Zone | Trusted for | Not trusted for |
 |---|---|---|
-| Buyer input | Expressing intent and explicit choices | SKU eligibility, price, stock, totals, payment status |
-| Groq model output | Candidate intent after Pydantic validation | Commerce authority or money values |
-| React frontend | Display and collection of buyer actions | Final prices, order identity, or payment verification |
-| JSON catalog | Merchant-controlled SKUs, prices, stock flags, compatibility, companion mappings | Real-time inventory reservation |
+| Buyer input | Expressing intent, goals, explicit confirmations | SKU eligibility, price, stock, totals, payment status |
+| Groq model output | Candidate structured intent or bounded delegated choice | Commerce authority, arbitrary SKUs, money values, payment truth |
+| Purchase mandate | Buyer-approved immutable authority limits | Dynamic inventory or payment state |
+| React frontend | Display and collection of buyer actions | Final price, order identity, payment verification |
+| JSON catalog | Merchant-controlled SKU, price, stock flags, compatibility, cross-sell mappings | Distributed inventory reservation |
 | FastAPI deterministic core | Eligibility, revalidation, state transitions, quotes, order payloads | Distributed transaction guarantees |
-| SQLite | Local persisted session, quote, order, and verified-payment state | Multi-instance coordination |
-| Razorpay | Test order and Checkout response | Proof of payment until the backend verifies the signature |
+| SQLite | Local persisted sessions, quotes, mandates, execution ledger, payments, audit events | Multi-instance coordination |
+| Razorpay | Test order creation and signed callback/webhook data | Payment truth until backend verification/reconciliation |
 
-## End-to-end flow
+# Mode 1: Buyer-controlled shopping
 
-### 1. Intent and base-product options
+## 1. Intent and base-product options
 
-1. `POST /api/shop` accepts a 3–500 character buyer message.
-2. `intent_extractor.py` calls Groq at temperature zero and requests strict JSON-schema output matching `ExtractedShoppingIntent`.
-3. Missing budget or essential compatibility information produces `clarification_required`; no catalog session, quote, order, or payment is created.
-4. `request_builder.py` converts whole rupees to integer paise and forces checkout confirmation on.
-5. `catalog.py` loads and validates the trusted catalog.
-6. `catalog_search.py` filters inactive, out-of-stock, over-budget, wrong-category, and incompatible products. It scores text matches deterministically and sorts ties by lower price and SKU.
-7. `recommender.py` returns at most three base-product options. The first is labeled as the best match, but the buyer must choose.
-8. `shopping_session_store.py` persists a ten-minute session containing the catalog version and offered SKU set.
+1. `POST /api/shop` accepts a buyer message.
+2. `intent_extractor.py` calls Groq at temperature zero and requests strict structured output.
+3. Missing essential details produce clarification; no quote/order/payment is created.
+4. `request_builder.py` converts rupees to integer paise and forces checkout confirmation on.
+5. `catalog.py` loads the trusted catalog.
+6. `catalog_search.py` deterministically filters inactive, out-of-stock, over-budget, wrong-category, and incompatible products.
+7. `recommender.py` returns bounded base-product options.
+8. `shopping_session_store.py` persists the offered SKU set and catalog version.
 
-Text relevance weights are deterministic:
+## 2. Base selection and cross-sell
 
-| Match location | Points per matching token |
-|---|---:|
-| Product name | 5 |
-| Product tags | 4 |
-| Category | 3 |
-| Compatibility tags | 2 |
-| Description | 1 |
+1. The buyer submits one offered base SKU.
+2. The backend confirms the SKU belonged to the stored session offer.
+3. Current catalog state, budget, stock, category, compatibility, and catalog version are revalidated.
+4. Cross-sell candidates come only from merchant-controlled `cross_sell_skus` mappings.
+5. The buyer accepts one offered companion or explicitly declines.
 
-### 2. Base selection and optional cross-sell
+## 3. Quote
 
-1. `POST /api/shop/select-base` accepts a session ID and one SKU.
-2. The backend requires that the SKU was in the stored offer, the session is live, and the catalog version has not changed.
-3. It reruns current deterministic eligibility checks for price, stock, budget, category, and compatibility.
-4. Cross-sell candidates come only from the selected base product’s trusted `cross_sell_skus` list.
-5. Base-category restrictions are not applied to companions, allowing combinations such as charger → cable.
-6. A companion must be active, in stock, compatible, within the remaining total budget, and priced at no more than 20% of the original buyer budget.
-7. At most two eligible companions are returned, ordered by price and then SKU. Nothing is preselected.
+Before quote creation, selected products are revalidated again against the current trusted catalog. `quote_service.py` creates an immutable INR quote using integer paise. `quote_store.py` persists it idempotently and links it to the shopping session.
 
-### 3. Cross-sell decision and quote
+# Mode 2: Delegated AI buyer
 
-`POST /api/shop/select-cross-sell` requires exactly one of these decisions:
+The delegated flow changes one key responsibility: the AI may choose the product, but only from a deterministic eligible set and only under a buyer-approved mandate.
 
-- `accept` with the SKU of an actually offered companion; or
-- `decline` with no companion SKU.
+## 1. Purchase mandate
 
-Before quote creation, the backend revalidates the selected products against the current trusted catalog. `quote_service.py` then creates an immutable, five-minute INR quote whose amounts are all integer paise.
+`POST /api/mandates` creates an immutable `PurchaseMandate` containing:
 
-For a session-backed quote, the quote ID reuses the random 32-hex-character portion of the session ID. This gives one deterministic quote identity per shopping session. `quote_store.py` makes same-terms retries idempotent and rejects a conflicting quote with the same identity. The quote is then linked back to that exact completed shopping session.
+- `budget_paise`
+- fixed `INR` currency
+- `allowed_categories`
+- `required_compatibility`
+- `max_cross_sell_percentage`
+- `checkout_confirmation_required = true`
+- optional `buyer_goal`
+- `created_at`
+- `expires_at`
 
-`catalog_version` records which catalog snapshot produced the offer. A version change before selection or quote creation forces a new search. After creation, checkout uses the prices stored in the quote rather than silently substituting current catalog prices.
+The mandate is stored as immutable JSON. There is no update path.
 
-### 4. Checkout and payment verification
+## 2. Mandate execution reservation
 
-1. The UI displays the stored quote; no order exists yet.
-2. `POST /api/checkout/confirm` requires `confirmed: true` and a valid quote ID.
-3. `checkout_service.py` requires the quote to be pending, unexpired, and linked to a `quote_created` shopping session.
-4. The Razorpay order amount, currency, receipt, and notes are built from the server-stored quote—not from frontend prices.
-5. The returned Razorpay order is checked for expected ID format, amount, currency, receipt, and `created` status before its ID is persisted.
-6. A repeat confirmation in the same stored state returns the existing Razorpay order.
-7. React loads Razorpay Checkout and supplies the public key ID plus the server-created order.
-8. `POST /api/payment/verify` compares the submitted order ID with the server-stored order, invokes Razorpay’s signature verification utility, and stores a payment only when verification returns true.
-9. A repeat verification for the same payment is idempotent; a conflicting payment for the same quote is rejected.
+Before AI planning starts, CartPilot reserves the mandate in `mandate_execution_ledger.py`.
 
-The Checkout success callback is therefore an input to verification, not proof of payment.
+The ledger is append-only. The mandate itself remains unchanged.
 
-## State machines
-
-### Shopping session
+Execution lifecycle:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> awaiting_base_selection: search returns options
-    awaiting_base_selection --> awaiting_cross_sell_decision: buyer selects base
-    awaiting_cross_sell_decision --> quote_created: buyer accepts or declines add-on
-    awaiting_base_selection --> expired: ten-minute timeout
-    awaiting_cross_sell_decision --> expired: ten-minute timeout
+    [*] --> reserved
+    reserved --> session_bound
+    session_bound --> quote_bound
+    quote_bound --> consumed
+    reserved --> released
+    session_bound --> released
+    quote_bound --> released
 ```
 
-Conditional SQL updates require the expected previous state, which prevents a stale operation from silently overwriting a competing transition in the same database.
+A consumed mandate cannot be reserved again. Only one active execution may exist for a mandate. This prevents a reusable static budget from authorizing multiple concurrent purchases.
 
-### Quote and payment
+## 3. Deterministic filtering before AI planning
+
+The delegated buyer does **not** receive the full catalog.
+
+The backend first filters products using:
+
+- mandate budget,
+- allowed categories,
+- required compatibility,
+- product active state,
+- product stock,
+- trusted catalog data.
+
+Only eligible product options are supplied to the AI planner.
+
+Cross-sell candidates are also deterministically restricted before model selection.
+
+## 4. AI purchase plan
+
+`delegated_buyer.py` asks Groq for strict structured output matching `DelegatedBuyerPlan`, containing:
+
+- base product SKU,
+- optional cross-sell SKU,
+- short reason,
+- confidence score.
+
+The model is instructed to choose only from the supplied eligible SKU set.
+
+Even after structured output, CartPilot verifies that:
+
+- selected base SKU is in the eligible set,
+- selected cross-sell belongs to the allowed list for that base product,
+- both products still satisfy the mandate,
+- prices still come from the trusted catalog.
+
+The AI cannot convert a fabricated SKU or price into authority.
+
+## 5. Session and quote binding
+
+Once a safe plan exists:
+
+1. a normal shopping session is created,
+2. the mandate execution is bound to that session,
+3. the AI-selected base product is recorded,
+4. an immutable quote is created,
+5. the quote is bound to the mandate execution ledger.
+
+The delegated flow stops at:
+
+```text
+purchase_ready_for_confirmation
+```
+
+No Razorpay order exists yet.
+
+## 6. Delegated checkout confirmation
+
+`POST /api/delegated-checkout/confirm` requires explicit buyer confirmation.
+
+Only then does CartPilot:
+
+1. call the existing checkout service,
+2. create or reuse the Razorpay order,
+3. consume the mandate execution authority.
+
+If the quote has expired, the execution may be safely released. Once consumed, it cannot be reused.
+
+# Checkout and payment verification
+
+## Browser callback path
+
+1. The buyer explicitly confirms checkout.
+2. `checkout_service.py` requires a pending, unexpired, linked quote.
+3. Razorpay order amount, currency, receipt, and notes are built from the server-stored quote.
+4. Returned order fields are checked before persistence.
+5. React opens Razorpay Checkout with the server-created order.
+6. `POST /api/payment/verify` compares the submitted order ID with server state and verifies the signature using Razorpay's utility.
+7. Only a verified result is persisted as a payment.
+
+The browser success callback is therefore an input to verification, not proof of payment.
+
+# Webhook recovery
+
+CartPilot also supports signed Razorpay webhook reconciliation for lost browser callbacks.
+
+`POST /api/payment/webhook`:
+
+1. validates body size,
+2. verifies the HMAC webhook signature using the configured webhook secret,
+3. validates the Razorpay event ID,
+4. hashes and persists webhook payload identity,
+5. rejects replay/conflicting reuse of an event ID,
+6. accepts only known CartPilot orders,
+7. verifies captured payment status,
+8. verifies amount and currency against the immutable quote,
+9. stores/reuses the verified payment,
+10. records `payment_reconciled` in the audit ledger.
+
+This allows payment recovery even when the browser callback is unavailable.
+
+# Read-only payment polling
+
+`GET /api/payment/status/{quote_id}` returns one of:
+
+- `checkout_not_started`
+- `confirmation_pending`
+- `verified`
+- `expired`
+
+The frontend can poll this endpoint after Razorpay checkout to detect a webhook-recovered payment without trusting browser state.
+
+# Commerce Flight Recorder audit ledger
+
+CartPilot stores persistent audit events for important buyer, AI, deterministic-core, and Razorpay actions.
+
+Examples include:
+
+- mandate created/accepted/rejected/expired,
+- intent extracted,
+- catalog searched,
+- product offered,
+- base product selected,
+- cross-sell evaluated/decided,
+- quote created/expired,
+- checkout confirmed,
+- order creation requested/created,
+- payment verification requested,
+- payment verified/rejected,
+- payment reconciled by webhook.
+
+Audit events may be scoped to a shopping session, purchase mandate, quote, or payment-provider identifiers. The frontend can render buyer-visible timelines from persisted events.
+
+# State machines
+
+## Shopping session
 
 ```mermaid
 stateDiagram-v2
-    [*] --> pending: quote stored
-    pending --> expired: five-minute timeout
-    pending --> order_created: explicit checkout confirmation
-    order_created --> verified_payment: valid Razorpay signature
+    [*] --> awaiting_base_selection
+    awaiting_base_selection --> awaiting_cross_sell_decision
+    awaiting_cross_sell_decision --> quote_created
+    awaiting_base_selection --> expired
+    awaiting_cross_sell_decision --> expired
 ```
 
-The verified payment is stored in a separate `payments` table. The quote itself remains in `order_created` state after verification.
+Delegated mode reuses this state machine; the difference is that the AI selects from the deterministic offered set instead of waiting for the human base-product click.
 
-## Persisted data
+## Quote and payment
 
-SQLite defaults to `backend/data/cartpilot.db`; `CARTPILOT_DB_PATH` can override it. Tables are created lazily on first use.
+```mermaid
+stateDiagram-v2
+    [*] --> pending
+    pending --> expired
+    pending --> order_created: buyer confirms checkout
+    order_created --> verified_payment: callback or signed webhook verification
+```
 
-| Table | Important fields | Key constraints |
-|---|---|---|
-| `shopping_sessions` | serialized request and SKU offers, status, quote link, timestamps | session ID primary key; quote ID unique and foreign-keyed |
-| `quotes` | immutable quote JSON, status, Razorpay order ID, timestamps | quote ID primary key; Razorpay order ID unique |
-| `payments` | quote ID, order ID, payment ID, verified timestamp | each quote, order, and payment ID is unique |
+# Persisted data
 
-The demo catalog is not stored in SQLite. `backend/data/products.json` is merchant-controlled source data with catalog version `2.0.0`, 33 products, eight categories, and deliberate inactive and out-of-stock edge cases.
+SQLite defaults to `backend/data/cartpilot.db`; `CARTPILOT_DB_PATH` can override it.
 
-## Module responsibilities
+Important persisted state includes:
+
+| Store / table | Purpose |
+|---|---|
+| `shopping_sessions` | Offered SKUs, selected base, session status, quote link |
+| `quotes` | Immutable quote terms and Razorpay order state |
+| `payments` | Verified payment identity and verification source |
+| `purchase_mandates` | Immutable buyer-approved purchase authority |
+| `mandate_execution_events` | Append-only reservation/binding/consumption history |
+| audit-event storage | Persistent commerce flight-recorder history |
+| webhook-event storage | Webhook replay/conflict protection |
+
+The trusted catalog remains `backend/data/products.json`.
+
+# Module responsibilities
 
 | File | Responsibility |
 |---|---|
-| `models.py` | Pydantic contracts and cross-field invariants |
-| `catalog.py` | Load, validate, normalize, and index trusted catalog data |
-| `catalog_search.py` | Deterministic eligibility filtering and relevance scoring |
-| `recommender.py` | Bounded base options and approved cross-sell options |
-| `request_builder.py` | Convert validated intent into a bounded internal request |
-| `config.py` | Read secrets and model configuration from environment variables |
-| `intent_extractor.py` | Isolated Groq adapter with strict structured output |
-| `commerce_agent.py` | Orchestrate intent, search, and initial session creation |
-| `database.py` | SQLite path selection and commit/rollback connection boundary |
-| `shopping_session_store.py` | Persist session state and guarded transitions |
-| `selection_service.py` | Revalidate buyer selections, offer companions, and finalize quote decisions |
-| `quote_service.py` | Validate trusted product terms and build immutable quotes |
-| `quote_store.py` | Persist quotes, Razorpay order IDs, and verified payments idempotently |
-| `checkout_service.py` | Gate confirmation and create a Razorpay order from stored terms |
-| `payment_service.py` | Verify Razorpay signatures before recording payments |
-| `main.py` | HTTP schemas, routes, CORS, and safe error mapping |
-| `frontend/src/api.js` | Typed-by-convention HTTP boundary for all backend actions |
-| `frontend/src/razorpay.js` | Load Checkout once and resolve its success response |
-| `frontend/src/App.jsx` | Render the buyer-controlled workflow and hold local UI state |
+| `models.py` | Pydantic contracts and invariants |
+| `catalog.py` | Load and validate trusted catalog |
+| `catalog_search.py` | Deterministic eligibility filtering and scoring |
+| `recommender.py` | Bounded base and cross-sell recommendations |
+| `request_builder.py` | Convert validated intent into internal request |
+| `intent_extractor.py` | Groq structured intent adapter |
+| `commerce_agent.py` | Orchestrate normal shopping flow |
+| `purchase_mandate_store.py` | Persist immutable mandates |
+| `purchase_mandate_service.py` | Create and authorize products under mandates |
+| `mandate_execution_ledger.py` | Reserve/bind/consume/release delegated authority |
+| `delegated_buyer.py` | Safe AI planning over deterministic eligible SKUs |
+| `delegated_api.py` | Delegated and restricted external-agent endpoints |
+| `shopping_session_store.py` | Persist guarded session transitions |
+| `selection_service.py` | Revalidate selections and create normal-flow quotes |
+| `quote_service.py` | Build immutable quotes from trusted catalog terms |
+| `quote_store.py` | Persist quotes, order IDs, and verified payments |
+| `checkout_service.py` | Buyer-confirmed Razorpay order creation |
+| `payment_service.py` | Verify browser callback signatures |
+| `payment_webhook.py` | Signed webhook recovery and reconciliation |
+| `payment_status.py` | Read-only payment recovery state |
+| `audit_events.py` | Persistent Commerce Flight Recorder events |
+| `main.py` | Core FastAPI routes |
+| `main_delegated.py` | Core API plus delegated-commerce router |
 
-## Important invariants
+# Important invariants
 
 - Currency is fixed to INR.
-- All internal money is positive integer paise; the UI alone formats rupees.
-- A shopping request cannot disable checkout confirmation.
-- Only active, in-stock catalog SKUs can be offered or quoted.
-- A selected base SKU must be one of that session’s stored offers.
-- An accepted cross-sell SKU must be one of that session’s stored companion offers and one of the base product’s merchant-approved mappings.
-- Base plus cross-sell cannot exceed the original total budget.
-- The cross-sell price cannot exceed 20% of the original budget.
-- A quote must equal the sum of its stored component prices and must have timezone-aware timestamps.
-- Checkout cannot use an orphan quote; the quote must be linked to the completed shopping session.
-- The frontend cannot override the amount sent to Razorpay.
-- A payment is persisted only after its order ID matches server state and Razorpay verifies the signature.
-- Repeating the same finalized decision, checkout confirmation, or payment verification is idempotent; conflicting retries are rejected.
+- All internal money values use integer paise.
+- Checkout confirmation cannot be disabled.
+- Only active, in-stock trusted catalog SKUs may be offered or quoted.
+- A normal-flow selected base SKU must belong to the session's stored offer set.
+- A delegated AI-selected SKU must belong to the deterministic eligible set supplied to the model.
+- Cross-sells must come from merchant-approved mappings and satisfy compatibility/budget limits.
+- The AI cannot change mandate fields, catalog price, stock, quote values, or payment status.
+- Only one active execution may use a purchase mandate.
+- A consumed mandate cannot be reused.
+- A mandate-bound live quote retains authority so the same mandate cannot create another active quote.
+- A quote must be linked to a shopping session before checkout.
+- Razorpay order amount comes from the immutable stored quote.
+- A browser payment is persisted only after signature verification.
+- A webhook payment is accepted only after signature, order, amount, currency, and captured-state validation.
+- Webhook event IDs cannot safely be replayed with different content.
+- Repeated compatible operations are idempotent; conflicting retries are rejected.
 
-## Failure behavior
+# External-agent boundary
+
+The restricted external-agent HTTP surface exposes high-level delegated capabilities such as:
+
+- create a mandate-bound purchase plan,
+- read execution state,
+- read existing mandate/audit information through the core APIs.
+
+It deliberately does not expose:
+
+- mandate mutation,
+- catalog price mutation,
+- unrestricted Razorpay order creation,
+- payment verification/forging authority.
+
+The current implementation is an HTTP capability boundary, not yet a dedicated MCP server.
+
+# Failure behavior
 
 | Condition | Result |
 |---|---|
-| Groq unavailable | `503`; no session or money action |
-| Invalid request or decision shape | `422` |
-| Missing session or quote | `404` |
-| Expired session or quote | `410` |
-| Catalog changed, SKU no longer eligible, or invalid state transition | `409` |
-| Razorpay order creation fails or returns inconsistent data | `502`; order is not marked created |
-| Payment signature is invalid | `400`; payment is not stored |
+| Groq unavailable | `503`; no unsafe commerce authority granted |
+| Invalid request/decision shape | `422` |
+| Missing session, quote, mandate, or execution | `404` |
+| Expired session/quote/mandate execution | `410` where applicable |
+| Catalog changed, invalid state transition, mandate already reserved/consumed | `409` |
+| Razorpay order creation inconsistent/fails | `502` |
+| Browser payment signature invalid | `400`; payment not stored |
+| Webhook signature malformed/invalid | `400` |
+| Webhook conflicts with stored state | `409` |
+| Webhook secret missing | `503` |
 
-## What is deliberately not delegated to the LLM
+# Testing and evidence
 
-The LLM cannot call commerce functions. It produces only `ExtractedShoppingIntent`, which has enumerated categories and compatibility tags plus validation rules. Catalog loading, text scoring, tie-breaking, allowed SKU sets, cross-sell mappings, price arithmetic, expiry, state transitions, order creation, and signature verification remain ordinary Python operations.
+The backend suite covers the original commerce core plus purchase mandates, audit events, payment recovery, delegated execution, and bounded AI buyer behavior. External Groq and Razorpay boundaries are mocked in automated tests.
 
-This boundary is more important than the choice of model provider. Replacing Groq should require changing the intent adapter, not the commerce invariants.
+Current project evidence:
 
-## Testing strategy and evidence
+- the full backend suite passed in GitHub Actions after delegated-buyer integration,
+- the delegated purchase flow was manually tested,
+- frontend ESLint and production Vite build passed during the commerce-audit/payment-recovery phase,
+- Razorpay webhook recovery is implemented and automated-test verified,
+- final production-style webhook recovery testing remains a deployment-stage check.
 
-The backend suite covers models, catalog validation, deterministic search, recommendation scenarios, session transitions, quote construction and persistence, selection services and APIs, checkout, payment verification, and endpoint error mapping. External Groq and Razorpay calls are patched at their boundaries.
+The workflow currently triggers automatically for `feature/buyer-purchase-mandate` and can also be launched manually via `workflow_dispatch`.
 
-Current locally reported evidence for `main`:
-
-- 109 backend tests passing.
-- Frontend production build passing.
-- One complete Razorpay Test Mode checkout manually completed with backend verification.
-
-This evidence is local: there is no CI workflow, no published coverage measurement, and no recorded clean-machine setup timing yet. `pytest.ini` also points to `backend/tests` while the suite currently lives in `backend/test`, so the explicit command `python -m pytest backend/test -q` is the reliable test entry point.
-
-## Production gaps
+# Production gaps
 
 CartPilot should not be presented as production-ready. Before real commerce use, it needs at least:
 
-1. Authentication, authorization, and ownership checks for sessions and quotes.
-2. A startup guard that rejects Razorpay live keys outside an explicitly approved production configuration.
-3. A database-backed idempotency design or distributed lock for multiple API workers.
-4. Recovery for a process crash after Razorpay creates an order but before the local transaction stores its ID.
-5. Inventory reservation, decrement, and reconciliation; current stock is only checked.
-6. Razorpay webhooks, replay protection, event reconciliation, refunds, and operational audit tooling.
-7. A production database and migration system instead of lazy SQLite table creation.
-8. HTTPS, hardened CORS, CSRF/threat review, secret management, rate limiting, monitoring, and structured logs.
-9. Session recovery in the frontend and accessible end-to-end browser tests.
-10. CI with pinned/managed dependencies, coverage reporting, and clean-environment startup measurement.
+1. authentication, authorization, and resource ownership checks,
+2. production secret management and environment enforcement,
+3. production database migrations and multi-worker coordination,
+4. durable idempotency around process crashes and remote order creation,
+5. transactional inventory reservation/decrement/reconciliation,
+6. full refund, dispute, cancellation, and webhook-event lifecycle handling,
+7. HTTPS, hardened CORS, rate limiting, threat review, and monitoring,
+8. stronger frontend session restoration and end-to-end browser testing,
+9. deployed webhook-recovery validation,
+10. a hardened external-agent authentication/authorization model before exposing delegated capabilities publicly.
 
-These gaps do not invalidate the demo’s core safety boundary; they define the difference between a working Test Mode prototype and a production commerce platform.
+These gaps define the distance between a strong buildathon/Test Mode prototype and a production commerce platform.

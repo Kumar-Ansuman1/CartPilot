@@ -141,6 +141,7 @@ def _eligible_cross_sells(
                     product=product,
                     current_total_paise=base.price_paise,
                     is_cross_sell=True,
+                    base_product=base,
                 )
             except (
                 PurchaseMandateExpiredError,
@@ -316,6 +317,7 @@ def run_delegated_purchase(
                 product=selected_cross_sell,
                 current_total_paise=selected_base.price_paise,
                 is_cross_sell=True,
+                base_product=selected_base,
             )
 
         record_base_product_selection(
@@ -398,7 +400,6 @@ def run_delegated_purchase(
                     "The delegated AI evaluated the eligible companion set and "
                     "did not select an add-on for this purchase."
                 ),
-                currency=mandate.currency,
             )
 
         record_audit_event(

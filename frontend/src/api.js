@@ -205,13 +205,17 @@ export function getDelegatedExecution(executionId) {
 }
 
 
-export function confirmDelegatedCheckout(quoteId) {
+export function confirmDelegatedCheckout(
+  executionId,
+  includeCrossSell
+) {
   return apiRequest(
     "/api/delegated-checkout/confirm",
     {
       method: "POST",
       body: JSON.stringify({
-        quote_id: quoteId,
+        execution_id: executionId,
+        include_cross_sell: includeCrossSell,
         confirmed: true,
       }),
     }

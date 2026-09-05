@@ -15,6 +15,7 @@ from backend.app.delegated_buyer import (
     DelegatedBuyerNoMatchError,
     DelegatedBuyerPlanError,
     DelegatedPurchaseResult,
+    finalize_delegated_quote,
     run_delegated_purchase,
 )
 from backend.app.mandate_execution_ledger import (
@@ -25,9 +26,24 @@ from backend.app.mandate_execution_ledger import (
     MandateExecutionStateError,
     consume_mandate_execution_for_quote,
     get_mandate_execution_state,
+    release_mandate_execution,
     release_mandate_execution_for_quote,
 )
-from backend.app.purchase_mandate_service import PurchaseMandateNotFoundError
+from backend.app.models import Quote
+from backend.app.purchase_mandate_service import (
+    PurchaseMandateExpiredError,
+    PurchaseMandateNotFoundError,
+    PurchaseMandatePolicyError,
+)
+from backend.app.selection_service import (
+    CatalogVersionChangedError,
+    SelectedProductsUnavailableError,
+)
+from backend.app.shopping_session_store import (
+    ShoppingSessionExpiredError,
+    ShoppingSessionNotFoundError,
+    ShoppingSessionStateError,
+)
 
 
 router = APIRouter(tags=["delegated-commerce"])
@@ -41,8 +57,15 @@ class DelegatedPurchaseRequest(BaseModel):
 
 class DelegatedCheckoutConfirmationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    quote_id: str = Field(pattern=r"^quote_[0-9a-f]{32}$")
+    execution_id: str = Field(pattern=r"^execution_[0-9a-f]{32}$")
+    include_cross_sell: bool = False
     confirmed: Literal[True]
+
+
+class DelegatedCheckoutResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    quote: Quote
+    checkout_order: CheckoutOrder
 
 
 def _execute(request: DelegatedPurchaseRequest) -> DelegatedPurchaseResult:
@@ -87,25 +110,58 @@ def external_agent_purchase_plan(
 
 @router.post(
     "/api/delegated-checkout/confirm",
-    response_model=CheckoutOrder,
-    summary="Buyer-confirm a mandate-bound quote and consume its authority",
+    response_model=DelegatedCheckoutResult,
+    summary="Buyer-finalize add-on choice, quote, and checkout",
 )
 def confirm_delegated_checkout(
     request: DelegatedCheckoutConfirmationRequest,
-) -> CheckoutOrder:
+) -> DelegatedCheckoutResult:
+    quote: Quote | None = None
     try:
-        order = create_checkout_order(request.quote_id)
-        consume_mandate_execution_for_quote(request.quote_id)
-        return order
-    except QuoteNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="The quote was not found.") from exc
+        quote = finalize_delegated_quote(
+            execution_id=request.execution_id,
+            include_cross_sell=request.include_cross_sell,
+        )
+        order = create_checkout_order(quote.quote_id)
+        consume_mandate_execution_for_quote(quote.quote_id)
+        return DelegatedCheckoutResult(
+            quote=quote,
+            checkout_order=order,
+        )
+    except (
+        PurchaseMandateNotFoundError,
+        MandateExecutionNotFoundError,
+        ShoppingSessionNotFoundError,
+        QuoteNotFoundError,
+    ) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (PurchaseMandateExpiredError, ShoppingSessionExpiredError) as exc:
+        try:
+            release_mandate_execution(
+                request.execution_id,
+                reason_code="DELEGATED_SELECTION_EXPIRED_RELEASED",
+            )
+        except Exception:
+            pass
+        raise HTTPException(status_code=410, detail=str(exc)) from exc
     except QuoteExpiredError as exc:
-        release_mandate_execution_for_quote(request.quote_id)
+        if quote is not None:
+            release_mandate_execution_for_quote(quote.quote_id)
         raise HTTPException(status_code=410, detail="The quote has expired.") from exc
-    except (QuoteNotLinkedError, MandateExecutionStateError) as exc:
+    except (
+        PurchaseMandatePolicyError,
+        MandateExecutionStateError,
+        ShoppingSessionStateError,
+        CatalogVersionChangedError,
+        SelectedProductsUnavailableError,
+        QuoteNotLinkedError,
+    ) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RazorpayOrderError as exc:
-        raise HTTPException(status_code=502, detail="The payment provider could not create the order.") from exc
+        raise HTTPException(
+            status_code=502,
+            detail="The payment provider could not create the order.",
+        ) from exc
 
 
 @router.get(

@@ -97,6 +97,7 @@ def authorize_product_under_mandate(
     product: Product,
     current_total_paise: int = 0,
     is_cross_sell: bool = False,
+    base_product: Product | None = None,
     evaluated_at: datetime | None = None,
 ) -> MandateProductAuthorization:
     if current_total_paise < 0:
@@ -120,6 +121,7 @@ def authorize_product_under_mandate(
         product=product,
         current_total_paise=current_total_paise,
         is_cross_sell=is_cross_sell,
+        base_product=base_product,
     )
     if violation is not None:
         reason_code, explanation = violation
@@ -162,6 +164,7 @@ def _find_policy_violation(
     product: Product,
     current_total_paise: int,
     is_cross_sell: bool,
+    base_product: Product | None,
 ) -> tuple[str, str] | None:
     if not product.active or product.stock <= 0:
         return (
@@ -169,8 +172,12 @@ def _find_policy_violation(
             "The product is not currently available for purchase.",
         )
 
-    if product.category.strip().lower() not in (
-        mandate.allowed_categories
+    # Mandate categories constrain the base purchase. Merchant-approved
+    # companions may be cross-category, matching the quote/recommender rules.
+    if (
+        not is_cross_sell
+        and product.category.strip().lower()
+        not in mandate.allowed_categories
     ):
         return (
             "CATEGORY_NOT_ALLOWED",
@@ -195,19 +202,26 @@ def _find_policy_violation(
         )
 
     if is_cross_sell:
-        if current_total_paise <= 0:
+        if current_total_paise <= 0 or base_product is None:
             return (
                 "CROSS_SELL_BASE_REQUIRED",
-                "A cross-sell requires an approved base-product total.",
+                "A cross-sell requires an approved base product and total.",
             )
+
+        if product.sku not in base_product.cross_sell_skus:
+            return (
+                "CROSS_SELL_NOT_APPROVED",
+                "The product is not a merchant-approved companion for the base product.",
+            )
+
         if (
             product.price_paise * 100
-            > current_total_paise
+            > mandate.budget_paise
             * mandate.max_cross_sell_percentage
         ):
             return (
                 "CROSS_SELL_LIMIT_EXCEEDED",
-                "The cross-sell exceeds the buyer-approved percentage.",
+                "The cross-sell exceeds the buyer-approved percentage of the total budget.",
             )
 
     return None

@@ -82,6 +82,8 @@ function AiBuyer() {
   const [purchase, setPurchase] = useState(null);
   const [execution, setExecution] = useState(null);
   const [audit, setAudit] = useState(null);
+  const [includeCrossSell, setIncludeCrossSell] = useState(false);
+  const [finalQuote, setFinalQuote] = useState(null);
   const [status, setStatus] = useState("idle");
   const [paymentStatus, setPaymentStatus] = useState("idle");
   const [error, setError] = useState("");
@@ -102,6 +104,13 @@ function AiBuyer() {
       buyerGoal.trim().length >= 3
     );
   }, [budgetRupees, allowedCategories, buyerGoal]);
+
+  const displayedTotalPaise = purchase
+    ? purchase.base_product.price_paise +
+      (includeCrossSell && purchase.cross_sell_product
+        ? purchase.cross_sell_product.price_paise
+        : 0)
+    : 0;
 
   async function refreshExecution(executionId) {
     if (!executionId) return;
@@ -130,6 +139,8 @@ function AiBuyer() {
     setPurchase(null);
     setExecution(null);
     setAudit(null);
+    setIncludeCrossSell(false);
+    setFinalQuote(null);
     setPaymentStatus("idle");
 
     try {
@@ -157,6 +168,8 @@ function AiBuyer() {
     setError("");
     setPurchase(null);
     setExecution(null);
+    setIncludeCrossSell(false);
+    setFinalQuote(null);
     setPaymentStatus("idle");
 
     try {
@@ -165,7 +178,7 @@ function AiBuyer() {
         task.trim()
       );
       setPurchase(result);
-      setStatus("quote_ready");
+      setStatus("selection_ready");
       void refreshExecution(result.execution_id);
       void refreshAudit(result.mandate_id);
     } catch (requestError) {
@@ -204,9 +217,14 @@ function AiBuyer() {
     setError("");
 
     try {
-      const checkoutOrder = await confirmDelegatedCheckout(
-        purchase.quote.quote_id
+      const checkoutResult = await confirmDelegatedCheckout(
+        purchase.execution_id,
+        includeCrossSell
       );
+      const quote = checkoutResult.quote;
+      const checkoutOrder = checkoutResult.checkout_order;
+      setFinalQuote(quote);
+
       await refreshExecution(purchase.execution_id);
       await refreshAudit(purchase.mandate_id);
 
@@ -220,7 +238,7 @@ function AiBuyer() {
 
       try {
         const verified = await verifyPayment(
-          purchase.quote.quote_id,
+          quote.quote_id,
           razorpayResponse
         );
         setPaymentStatus(
@@ -231,8 +249,8 @@ function AiBuyer() {
         setStatus("completed");
       } catch {
         setPaymentStatus("pending");
-        setStatus("quote_ready");
-        void pollPayment(purchase.quote.quote_id);
+        setStatus("selection_ready");
+        void pollPayment(quote.quote_id);
       }
 
       void refreshExecution(purchase.execution_id);
@@ -240,7 +258,7 @@ function AiBuyer() {
     } catch (checkoutError) {
       setError(checkoutError.message);
       setPaymentStatus("idle");
-      setStatus("quote_ready");
+      setStatus("selection_ready");
     }
   }
 
@@ -249,6 +267,8 @@ function AiBuyer() {
     setPurchase(null);
     setExecution(null);
     setAudit(null);
+    setIncludeCrossSell(false);
+    setFinalQuote(null);
     setError("");
     setStatus("idle");
     setPaymentStatus("idle");
@@ -277,7 +297,7 @@ function AiBuyer() {
         <p>
           The AI buyer may select only from products that deterministic code
           has already approved under your immutable purchase mandate. Payment
-          still requires your confirmation.
+          and the optional add-on still require your confirmation.
         </p>
       </section>
 
@@ -358,7 +378,7 @@ function AiBuyer() {
 
             <div className="split-fields">
               <label>
-                Max cross-sell %
+                Max cross-sell % of budget
                 <input
                   type="number"
                   min="0"
@@ -451,7 +471,7 @@ function AiBuyer() {
                     <span>AI selected</span>
                     <strong>{purchase.base_product.name}</strong>
                   </div>
-                  <b>{formatMoney(purchase.quote.base_price_paise)}</b>
+                  <b>{formatMoney(purchase.base_product.price_paise)}</b>
                 </div>
 
                 <p className="plan-reason">{purchase.plan.reason}</p>
@@ -465,23 +485,49 @@ function AiBuyer() {
 
                 {purchase.cross_sell_product && (
                   <div className="add-on-box">
-                    <span>AI also chose an eligible add-on</span>
+                    <label
+                      className="choice-chip"
+                      style={{ gridColumn: "1 / -1", justifySelf: "start" }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={includeCrossSell}
+                        onChange={(event) =>
+                          setIncludeCrossSell(event.target.checked)
+                        }
+                        disabled={
+                          busy ||
+                          Boolean(finalQuote) ||
+                          paymentStatus !== "idle"
+                        }
+                      />
+                      Include this AI-recommended add-on
+                    </label>
+                    <span>AI recommends an eligible add-on</span>
                     <strong>{purchase.cross_sell_product.name}</strong>
                     <b>
-                      +{formatMoney(purchase.quote.upsell_price_paise)}
+                      +{formatMoney(purchase.cross_sell_product.price_paise)}
                     </b>
                   </div>
                 )}
 
                 <div className="quote-summary">
                   <div>
-                    <span>Total immutable quote</span>
+                    <span>
+                      {finalQuote ? "Final immutable quote" : "Purchase total"}
+                    </span>
                     <small>
-                      <Clock3 size={13} /> valid until{" "}
-                      {new Date(purchase.quote.expires_at).toLocaleTimeString()}
+                      <Clock3 size={13} />
+                      {finalQuote
+                        ? ` valid until ${new Date(finalQuote.expires_at).toLocaleTimeString()}`
+                        : " final quote is created only when you confirm"}
                     </small>
                   </div>
-                  <strong>{formatMoney(purchase.quote.total_paise)}</strong>
+                  <strong>
+                    {formatMoney(
+                      finalQuote ? finalQuote.total_paise : displayedTotalPaise
+                    )}
+                  </strong>
                 </div>
 
                 <div className="safety-trace">
@@ -505,7 +551,7 @@ function AiBuyer() {
                     <LockKeyhole size={18} />
                   )}
                   {paymentStatus === "creating_order"
-                    ? "Creating order…"
+                    ? "Finalizing quote…"
                     : paymentStatus === "checkout_open"
                       ? "Opening Razorpay…"
                       : paymentStatus === "verifying"

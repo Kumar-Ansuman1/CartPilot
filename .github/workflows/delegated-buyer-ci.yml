@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/buyer-purchase-mandate
+      - feature/ai-buyer-cross-sell
   workflow_dispatch:
 
 permissions:
@@ -28,5 +29,6 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r backend/requirements.txt
 
+      # Includes delegated cross-sell regression coverage.
       - name: Run backend tests
         run: python -m pytest backend/test -q

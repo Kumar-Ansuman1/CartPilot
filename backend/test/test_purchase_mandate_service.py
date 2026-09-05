@@ -71,21 +71,17 @@ def test_creation_is_audited_and_product_is_accepted() -> None:
 
 
 @pytest.mark.parametrize(
-    ("product_changes", "current_total", "is_cross_sell", "reason"),
+    ("product_changes", "reason"),
     [
-        ({"category": "cables"}, 0, False, "CATEGORY_NOT_ALLOWED"),
-        ({"compatibility_tags": ["lightning"]}, 0, False,
+        ({"category": "cables"}, "CATEGORY_NOT_ALLOWED"),
+        ({"compatibility_tags": ["lightning"]},
          "COMPATIBILITY_NOT_SATISFIED"),
-        ({"price_paise": 250_000}, 0, False, "BUDGET_EXCEEDED"),
-        ({"active": False}, 0, False, "PRODUCT_UNAVAILABLE"),
-        ({"price_paise": 30_000}, 100_000, True,
-         "CROSS_SELL_LIMIT_EXCEEDED"),
+        ({"price_paise": 250_000}, "BUDGET_EXCEEDED"),
+        ({"active": False}, "PRODUCT_UNAVAILABLE"),
     ],
 )
-def test_policy_violations_are_rejected_and_audited(
+def test_base_policy_violations_are_rejected_and_audited(
     product_changes,
-    current_total,
-    is_cross_sell,
     reason,
 ) -> None:
     mandate = make_mandate()
@@ -94,8 +90,6 @@ def test_policy_violations_are_rejected_and_audited(
         authorize_product_under_mandate(
             mandate_id=mandate.mandate_id,
             product=make_product(**product_changes),
-            current_total_paise=current_total,
-            is_cross_sell=is_cross_sell,
             evaluated_at=NOW + timedelta(minutes=1),
         )
 
@@ -106,6 +100,109 @@ def test_policy_violations_are_rejected_and_audited(
         "mandate_rejected",
     ]
     assert events[-2].reason_code == reason
+
+
+def test_cross_sell_requires_approved_base_product() -> None:
+    mandate = make_mandate()
+    cable = make_product(
+        sku="CBL-001",
+        category="cables",
+        price_paise=19_900,
+    )
+
+    with pytest.raises(PurchaseMandatePolicyError) as error:
+        authorize_product_under_mandate(
+            mandate_id=mandate.mandate_id,
+            product=cable,
+            current_total_paise=79_900,
+            is_cross_sell=True,
+            evaluated_at=NOW + timedelta(minutes=1),
+        )
+
+    assert error.value.reason_code == "CROSS_SELL_BASE_REQUIRED"
+
+
+def test_cross_category_merchant_companion_is_authorized() -> None:
+    mandate = make_mandate()
+    base = make_product(
+        sku="CHG-20W-001",
+        price_paise=79_900,
+        cross_sell_skus=["CBL-001"],
+    )
+    cable = make_product(
+        sku="CBL-001",
+        name="USB-C Cable",
+        description="Useful USB-C charging companion",
+        category="cables",
+        price_paise=19_900,
+    )
+
+    result = authorize_product_under_mandate(
+        mandate_id=mandate.mandate_id,
+        product=cable,
+        current_total_paise=base.price_paise,
+        is_cross_sell=True,
+        base_product=base,
+        evaluated_at=NOW + timedelta(minutes=1),
+    )
+
+    assert result.authorized is True
+    assert result.sku == "CBL-001"
+
+
+def test_cross_sell_must_be_merchant_approved_for_base() -> None:
+    mandate = make_mandate()
+    base = make_product(
+        sku="CHG-20W-001",
+        price_paise=79_900,
+        cross_sell_skus=["CBL-OTHER"],
+    )
+    cable = make_product(
+        sku="CBL-001",
+        category="cables",
+        price_paise=19_900,
+    )
+
+    with pytest.raises(PurchaseMandatePolicyError) as error:
+        authorize_product_under_mandate(
+            mandate_id=mandate.mandate_id,
+            product=cable,
+            current_total_paise=base.price_paise,
+            is_cross_sell=True,
+            base_product=base,
+            evaluated_at=NOW + timedelta(minutes=1),
+        )
+
+    assert error.value.reason_code == "CROSS_SELL_NOT_APPROVED"
+
+
+def test_cross_sell_limit_uses_original_mandate_budget() -> None:
+    mandate = make_mandate(
+        budget_paise=200_000,
+        max_cross_sell_percentage=20,
+    )
+    base = make_product(
+        sku="CHG-20W-001",
+        price_paise=79_900,
+        cross_sell_skus=["CBL-001"],
+    )
+    cable = make_product(
+        sku="CBL-001",
+        category="cables",
+        price_paise=40_100,
+    )
+
+    with pytest.raises(PurchaseMandatePolicyError) as error:
+        authorize_product_under_mandate(
+            mandate_id=mandate.mandate_id,
+            product=cable,
+            current_total_paise=base.price_paise,
+            is_cross_sell=True,
+            base_product=base,
+            evaluated_at=NOW + timedelta(minutes=1),
+        )
+
+    assert error.value.reason_code == "CROSS_SELL_LIMIT_EXCEEDED"
 
 
 def test_expired_mandate_rejects_and_audits_attempt() -> None:

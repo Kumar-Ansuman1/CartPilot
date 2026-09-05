@@ -1,0 +1,113 @@
+.mode-switch-shell {
+  width: min(1180px, calc(100% - 32px));
+  margin: 18px auto 0;
+  padding: 10px 12px 10px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border: 1px solid rgba(89, 76, 145, 0.14);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 12px 35px rgba(44, 34, 88, 0.08);
+  backdrop-filter: blur(16px);
+}
+
+.mode-switch-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mode-switch-kicker {
+  color: #766e8f;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+.mode-switch-copy strong {
+  color: #201a39;
+  font-size: 0.94rem;
+}
+
+.mode-switch-control {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+  padding: 5px;
+  border: 1px solid #e8e4f1;
+  border-radius: 14px;
+  background: #f5f3f9;
+}
+
+.mode-option {
+  min-width: 132px;
+  min-height: 48px;
+  padding: 7px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 10px;
+  color: #716a83;
+  transition: background 160ms ease, color 160ms ease, box-shadow 160ms ease;
+}
+
+.mode-option span {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+
+.mode-option b {
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.mode-option small {
+  margin-top: 2px;
+  font-size: 0.67rem;
+  color: inherit;
+  opacity: 0.72;
+}
+
+.mode-option.active {
+  color: #3d2f73;
+  background: #ffffff;
+  box-shadow: 0 3px 12px rgba(53, 39, 105, 0.11);
+}
+
+.mode-option:focus-visible {
+  outline: 3px solid rgba(104, 82, 190, 0.24);
+  outline-offset: 2px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .mode-option:not(.active):hover {
+    color: #3d2f73;
+    background: rgba(255, 255, 255, 0.62);
+  }
+}
+
+@media (max-width: 640px) {
+  .mode-switch-shell {
+    width: min(100% - 20px, 1180px);
+    margin-top: 10px;
+    padding: 10px;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 9px;
+  }
+
+  .mode-switch-copy {
+    padding: 0 4px;
+  }
+
+  .mode-option {
+    min-width: 0;
+    padding-inline: 8px;
+  }
+}

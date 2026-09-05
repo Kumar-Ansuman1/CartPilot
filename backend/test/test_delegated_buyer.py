@@ -30,7 +30,7 @@ def test_ai_plan_is_revalidated_and_quote_is_mandate_bound(monkeypatch) -> None:
         budget_paise=200_000,
         allowed_categories=["chargers"],
         required_compatibility=["usb-c", "android"],
-        max_cross_sell_percentage=20,
+        max_cross_sell_percentage=0,
         buyer_goal="Buy a compact Android USB-C charger",
         created_at=NOW,
         expires_in_minutes=1_440,
@@ -39,10 +39,11 @@ def test_ai_plan_is_revalidated_and_quote_is_mandate_bound(monkeypatch) -> None:
     def fake_plan(**kwargs):
         eligible = {product.sku for product in kwargs["base_products"]}
         assert "CHG-20W-001" in eligible
+        assert kwargs["cross_sells"]["CHG-20W-001"] == []
         return DelegatedBuyerPlan(
             base_product_sku="CHG-20W-001",
             cross_sell_product_sku=None,
-            reason="Compact eligible charger; no companion is needed for this task.",
+            reason="Compact eligible charger; cross-sell is disabled by the mandate.",
             confidence=0.91,
         )
 
@@ -75,7 +76,7 @@ def test_ai_plan_is_revalidated_and_quote_is_mandate_bound(monkeypatch) -> None:
         if event.event_type == "cross_sell_decided"
     ]
     assert len(cross_sell_events) == 1
-    assert cross_sell_events[0].reason_code == "AI_DECLINED_CROSS_SELL"
+    assert cross_sell_events[0].reason_code == "NO_ELIGIBLE_CROSS_SELL"
 
     with pytest.raises(MandateAlreadyReservedError):
         run_delegated_purchase(

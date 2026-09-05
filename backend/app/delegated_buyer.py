@@ -195,7 +195,11 @@ def _plan_with_ai(
             "Delegated AI planning failed."
         ) from exc
 
-    plan = result if isinstance(result, DelegatedBuyerPlan) else DelegatedBuyerPlan.model_validate(result)
+    plan = (
+        result
+        if isinstance(result, DelegatedBuyerPlan)
+        else DelegatedBuyerPlan.model_validate(result)
+    )
 
     base_by_sku = {product.sku: product for product in base_products}
     if plan.base_product_sku not in base_by_sku:
@@ -316,7 +320,9 @@ def run_delegated_purchase(
             request=request,
             base_product_sku=selected_base.sku,
             upsell_product_sku=(
-                selected_cross_sell.sku if selected_cross_sell is not None else None
+                selected_cross_sell.sku
+                if selected_cross_sell is not None
+                else None
             ),
             session_id=session.session_id,
         )
@@ -390,8 +396,12 @@ def run_delegated_purchase(
             ],
         )
     except Exception:
-        try:
-            release_mandate_execution(execution.execution_id)
-        except Exception:
-            pass
+        # A live quote must retain its reservation even if a later audit write
+        # fails; otherwise the same mandate could be reused while that quote
+        # is still confirmable. Only pre-quote failures release authority.
+        if execution.status == "reserved":
+            try:
+                release_mandate_execution(execution.execution_id)
+            except Exception:
+                pass
         raise

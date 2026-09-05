@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Bot,
   CheckCircle2,
@@ -121,12 +121,6 @@ function AiBuyer() {
     }
   }
 
-  useEffect(() => {
-    if (!purchase?.execution_id) return;
-    void refreshExecution(purchase.execution_id);
-    void refreshAudit(purchase.mandate_id);
-  }, [purchase]);
-
   async function handleCreateMandate(event) {
     event.preventDefault();
     if (!canCreateMandate || busy) return;
@@ -172,6 +166,8 @@ function AiBuyer() {
       );
       setPurchase(result);
       setStatus("quote_ready");
+      void refreshExecution(result.execution_id);
+      void refreshAudit(result.mandate_id);
     } catch (requestError) {
       setError(requestError.message);
       setStatus("mandate_ready");

@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from backend.app.audit_events import (
     AuditEvent,
     AuditEventConflictError,
+    deterministic_audit_event_id,
     get_audit_event,
     list_audit_events,
     list_quote_audit_events,
@@ -75,6 +76,27 @@ def test_new_event_normalizes_sku() -> None:
 
     assert event.sku == "CHG-001"
     assert event.created_at.tzinfo is not None
+
+
+def test_deterministic_event_id_uses_logical_subject() -> None:
+    first_id = deterministic_audit_event_id(
+        session_id=SESSION_ID,
+        event_type="base_product_selected",
+        subject="accepted:CHG-001",
+    )
+    retry_id = deterministic_audit_event_id(
+        session_id=SESSION_ID,
+        event_type="base_product_selected",
+        subject="accepted:CHG-001",
+    )
+    different_id = deterministic_audit_event_id(
+        session_id=SESSION_ID,
+        event_type="base_product_selected",
+        subject="accepted:CHG-002",
+    )
+
+    assert first_id == retry_id
+    assert first_id != different_id
 
 
 def test_event_rejects_unknown_fields() -> None:
@@ -156,6 +178,28 @@ def test_identical_retry_returns_existing_event() -> None:
 
     assert retry_result == first_result
     assert list_audit_events(SESSION_ID) == [event]
+
+
+def test_logical_retry_keeps_original_timestamp() -> None:
+    event = make_event()
+    retry_payload = event.model_dump()
+    retry_payload["created_at"] = datetime(
+        2026,
+        1,
+        2,
+        tzinfo=timezone.utc,
+    )
+    retry_event = AuditEvent.model_validate(
+        retry_payload
+    )
+
+    save_audit_event_idempotently(event)
+    retry_result = save_audit_event_idempotently(
+        retry_event
+    )
+
+    assert retry_result == event
+    assert retry_result.created_at == CREATED_AT
 
 
 def test_conflicting_event_id_is_rejected() -> None:

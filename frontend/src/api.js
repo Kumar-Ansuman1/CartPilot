@@ -147,6 +147,78 @@ export function confirmCheckout(quoteId) {
 }
 
 
+export function createPurchaseMandate({
+  budgetPaise,
+  allowedCategories,
+  requiredCompatibility,
+  maxCrossSellPercentage,
+  expiresInMinutes,
+  buyerGoal,
+}) {
+  return apiRequest("/api/mandates", {
+    method: "POST",
+    body: JSON.stringify({
+      budget_paise: budgetPaise,
+      allowed_categories: allowedCategories,
+      required_compatibility: requiredCompatibility,
+      max_cross_sell_percentage: maxCrossSellPercentage,
+      expires_in_minutes: expiresInMinutes,
+      checkout_confirmation_required: true,
+      buyer_goal: buyerGoal,
+    }),
+  });
+}
+
+
+export function getPurchaseMandate(mandateId) {
+  return apiRequest(
+    `/api/mandates/${encodeURIComponent(mandateId)}`,
+    { method: "GET" }
+  );
+}
+
+
+export function getMandateAudit(mandateId) {
+  return apiRequest(
+    `/api/mandates/${encodeURIComponent(mandateId)}/audit`,
+    { method: "GET" }
+  );
+}
+
+
+export function runDelegatedShop(mandateId, task) {
+  return apiRequest("/api/delegated-shop", {
+    method: "POST",
+    body: JSON.stringify({
+      mandate_id: mandateId,
+      task,
+    }),
+  });
+}
+
+
+export function getDelegatedExecution(executionId) {
+  return apiRequest(
+    `/api/agent/executions/${encodeURIComponent(executionId)}`,
+    { method: "GET" }
+  );
+}
+
+
+export function confirmDelegatedCheckout(quoteId) {
+  return apiRequest(
+    "/api/delegated-checkout/confirm",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        quote_id: quoteId,
+        confirmed: true,
+      }),
+    }
+  );
+}
+
+
 export function verifyPayment(
   quoteId,
   razorpayResponse

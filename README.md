@@ -1,72 +1,153 @@
 # CartPilot
 
-CartPilot is a buyer-controlled, agentic-commerce demo for the fictional electronics merchant **VoltCart**. A language model turns a natural-language request into validated shopping intent; deterministic Python code owns catalog lookup, eligibility, prices, stock checks, quotes, order creation, and payment verification.
+CartPilot is a buyer-controlled agentic-commerce demo for the fictional electronics merchant **VoltCart**. It combines LLM-based intent understanding and delegated product selection with a deterministic commerce core that owns catalog eligibility, prices, stock checks, quotes, mandate enforcement, checkout, payment verification, webhook recovery, and audit history.
 
-> **Current status:** the complete flow works locally with Razorpay Test Mode. This is a learning/demo system, not a production checkout service. Use Test Mode credentials only—no real money is required or intended.
+> **Current status:** the complete local flow works with Razorpay Test Mode. The delegated AI-buyer flow has also been manually verified. Production-style webhook recovery will be validated after deployment. CartPilot is still a learning/buildathon system, not a production checkout platform.
 
-## What works today
+## What CartPilot can do
 
 - Natural-language shopping intent extraction through Groq structured output.
 - Deterministic filtering and ranking against a trusted local catalog.
-- Up to three eligible base-product choices, with a non-binding “best match” hint.
-- Explicit buyer selection of the base product.
-- Up to two optional, catalog-approved cross-sells; nothing is preselected.
-- Explicit acceptance or rejection of the add-on step.
-- Five-minute server-stored quotes using integer paise.
+- Up to three eligible base-product choices in the normal shopping flow.
+- Explicit buyer selection and optional cross-sell handling in the normal flow.
+- Immutable five-minute server-stored quotes using integer paise.
 - Explicit checkout confirmation before Razorpay order creation.
 - Razorpay Checkout in Test Mode.
 - Server-side Razorpay signature verification before a payment is stored as verified.
-- SQLite persistence for shopping sessions, quotes, order IDs, and verified payments.
+- Signed Razorpay webhook recovery for lost browser callbacks.
+- Read-only payment-status polling for frontend recovery.
+- Persistent Commerce Flight Recorder audit events for buyer, AI, deterministic-core, and Razorpay actions.
+- Buyer-visible audit timelines for shopping sessions and purchase mandates.
+- Immutable buyer-approved purchase mandates.
+- An append-only mandate execution ledger that prevents the same authority from funding multiple purchases.
+- A delegated AI buyer that may select a product only from deterministic, mandate-approved SKU sets.
+- A deliberately restricted external-agent API that cannot mutate mandates or bypass buyer checkout confirmation.
+
+## Two shopping modes
+
+### 1. Buyer-controlled shopping
+
+```text
+Buyer request
+    -> AI intent extraction
+    -> deterministic catalog filtering
+    -> buyer selects base product
+    -> buyer accepts/declines add-on
+    -> immutable quote
+    -> buyer confirms checkout
+    -> Razorpay
+```
+
+In this mode the AI interprets language but the human buyer chooses the product.
+
+### 2. Delegated AI buyer
+
+```text
+Buyer creates immutable mandate
+    -> mandate authority reserved
+    -> deterministic catalog filtering
+    -> AI chooses only from eligible SKUs
+    -> deterministic revalidation
+    -> mandate-bound shopping session
+    -> immutable quote
+    -> buyer confirms checkout
+    -> Razorpay
+    -> mandate authority consumed
+```
+
+In delegated mode the AI may make the product decision, but it does **not** receive unrestricted commerce or payment authority.
 
 ## Safety boundary
 
 | The AI may | The AI may not |
 |---|---|
-| Interpret the buyer’s words | Invent or select a SKU |
-| Extract a budget, category, and compatibility requirements | Set a catalog price or stock level |
-| Ask for missing details | Create or alter a quote |
-| Produce a short search query | Create an order or verify a payment |
+| Interpret a buyer request | Invent a catalog SKU |
+| Extract structured shopping intent | Set or modify catalog prices |
+| Rank/select from a deterministic eligible SKU set in delegated mode | Override stock or compatibility checks |
+| Explain why it chose an eligible product | Modify a buyer-approved mandate |
+| Propose an optional eligible cross-sell | Create a Razorpay order without buyer confirmation |
+| Return a strict structured purchase plan | Verify, forge, or declare a payment successful |
 
-The model’s output is schema-validated. It can influence the search constraints, but all purchasable items and money-related values must come from deterministic code and the trusted catalog. The buyer still chooses the product and explicitly confirms checkout.
+The important rule is:
 
-## Buyer flow
+> **AI may influence choice. Deterministic code owns commerce authority. The buyer still gates payment.**
 
-1. Enter a request such as `I need a USB-C charger for Android under ₹2,000`.
-2. Groq extracts validated intent. Missing budget or compatibility details stop the flow for clarification.
-3. The backend converts rupees to paise, searches the catalog, and returns at most three eligible products.
-4. The buyer selects one offered base product.
-5. The backend revalidates it and may offer at most two approved companion products.
-6. The buyer accepts one offered add-on or explicitly continues without one.
-7. The backend revalidates the chosen terms and stores a five-minute quote.
-8. The buyer reviews the total and clicks **Confirm & Pay**.
-9. The backend creates one Razorpay order from the stored quote amount.
-10. The frontend opens Razorpay Checkout.
-11. The backend verifies the returned Razorpay signature and only then records the payment as verified.
+The model never supplies the authoritative price, inventory value, quote total, order identity, or payment result. Those values come from trusted server-side state.
 
-Cross-sells can be from a different category—for example, charger → cable—but only when the base product explicitly lists that SKU as an approved companion. The add-on must also be active, in stock, compatible, within the remaining total budget, and no more than 20% of the buyer’s original budget.
+## Buyer purchase mandates
+
+A purchase mandate is an immutable buyer-approved authorization containing fields such as:
+
+- budget in paise
+- fixed INR currency
+- allowed product categories
+- required compatibility tags
+- maximum cross-sell percentage
+- buyer goal
+- expiry time
+- mandatory checkout confirmation
+
+Example intent:
+
+```text
+Budget: <= Rs 2,000
+Category: chargers
+Compatibility: Android + USB-C
+Cross-sell: <= 20%
+Goal: choose a compact everyday charger
+Checkout confirmation: required
+```
+
+The mandate itself is never mutated. Usage is tracked separately through an append-only execution ledger.
+
+## Mandate execution lifecycle
+
+```text
+reserved
+   -> session_bound
+   -> quote_bound
+   -> consumed
+
+or, before consumption:
+
+reserved / quote_bound -> released
+```
+
+Only one active delegated execution may use a mandate. A consumed mandate cannot be reused. A failed execution may be released when it is safe to do so. Once a live quote exists, CartPilot intentionally keeps the reservation so the same mandate cannot fund another quote at the same time.
+
+## Payment recovery and audit trail
+
+CartPilot records buyer-visible audit events for important commerce transitions, including intent extraction, catalog search, product offers and selections, quote creation, checkout confirmation, order creation, payment verification, payment rejection, mandate authorization, and webhook reconciliation.
+
+For payment recovery:
+
+1. Checkout first attempts the normal browser callback path.
+2. The backend verifies the Razorpay signature against the server-stored order.
+3. If the browser callback is lost, a signed Razorpay `order.paid` webhook can reconcile the payment.
+4. The frontend can poll the read-only payment-status API until the payment is verified or the quote expires.
+5. Webhook event IDs and payload hashes are persisted to prevent unsafe replay/conflicting reuse.
 
 ## Stack
 
 - Backend: Python, FastAPI, Pydantic, LangChain Groq
-- Commerce logic: deterministic Python search, ranking, recommendation, and validation
+- Commerce logic: deterministic Python search, ranking, recommendation, mandate enforcement, quote and payment validation
 - Storage: SQLite
-- Payments: Razorpay Checkout and Orders API in Test Mode
+- Catalog: versioned local JSON
+- Payments: Razorpay Checkout, Orders API, signature verification, signed webhooks
 - Frontend: React 19, Vite 8, Lucide React
 - Tests: Pytest and FastAPI TestClient
+- CI: GitHub Actions workflow for the delegated-buyer branch, plus manual dispatch
 
 ## Run locally
-
-The setup is intentionally short and uses committed dependency manifests and demo catalog data. The target is a working clone in under 15 minutes once API credentials are available. A clean-machine setup time has **not yet been formally measured**, so that is a target rather than a benchmark.
 
 ### 1. Prerequisites
 
 - Git
 - Python 3.11 or newer
-- Node.js `20.19+` or `22.12+` (required by the locked Vite version)
-- A [Groq API key](https://console.groq.com/keys)
-- Razorpay **Test Mode** API keys from the Razorpay dashboard
-
-Do not use Razorpay live-mode credentials. The application does not yet enforce the `rzp_test_` key prefix in code.
+- Node.js `20.19+` or `22.12+`
+- A Groq API key
+- Razorpay **Test Mode** API keys
+- Razorpay webhook secret when testing webhook reconciliation
 
 ### 2. Clone and prepare the backend
 
@@ -79,35 +160,23 @@ python -m venv .venv
 Activate the environment:
 
 ```powershell
-# Windows PowerShell
 .\.venv\Scripts\Activate.ps1
 ```
 
+or on macOS/Linux:
+
 ```bash
-# macOS or Linux
 source .venv/bin/activate
 ```
 
-Install the backend dependencies:
+Install dependencies:
 
 ```bash
 python -m pip install --upgrade pip
 python -m pip install -r backend/requirements.txt
 ```
 
-Copy the environment template:
-
-```powershell
-# Windows PowerShell
-Copy-Item .env.example .env
-```
-
-```bash
-# macOS or Linux
-cp .env.example .env
-```
-
-Fill in `.env`:
+Copy `.env.example` to `.env` and configure:
 
 ```dotenv
 GROQ_API_KEY=your_groq_key
@@ -115,22 +184,32 @@ GROQ_MODEL=openai/gpt-oss-20b
 
 RAZORPAY_KEY_ID=rzp_test_your_key_id
 RAZORPAY_KEY_SECRET=your_test_key_secret
-RAZORPAY_WEBHOOK_SECRET=
+RAZORPAY_WEBHOOK_SECRET=your_webhook_secret
 ```
 
-`RAZORPAY_WEBHOOK_SECRET` is reserved for future webhook support and may remain empty. Never commit `.env`; it is ignored by Git.
+Never commit `.env`.
 
-Start the API from the repository root:
+### 3. Start the API
+
+For the original buyer-controlled flow:
 
 ```bash
 python -m uvicorn backend.app.main:app --reload
 ```
 
-Check [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health) and browse the interactive API docs at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
+For the full API including delegated commerce:
 
-### 3. Start the frontend
+```bash
+python -m uvicorn backend.app.main_delegated:app --reload
+```
 
-Open a second terminal in the repository root:
+Then open:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+### 4. Start the frontend
 
 ```bash
 cd frontend
@@ -138,88 +217,137 @@ npm ci
 npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173). The frontend uses `http://127.0.0.1:8000` by default. Set `VITE_API_BASE_URL` before starting Vite if the API runs elsewhere.
+Open `http://localhost:5173`.
 
-### 4. Try a Test Mode purchase
+## Delegated-buyer quick test
 
-Use a request that includes both a product and budget, for example:
+Create a mandate:
 
-```text
-I need a USB-C charger for Android under ₹2,000
+```http
+POST /api/mandates
 ```
 
-Select a base product, accept or decline an optional add-on, review the quote, and use Razorpay’s published Test Mode payment details in Checkout. A successful Checkout response is not trusted by itself; CartPilot sends it to the backend for signature verification.
+Then request a delegated purchase plan:
+
+```http
+POST /api/delegated-shop
+```
+
+or through the deliberately restricted external-agent surface:
+
+```http
+POST /api/agent/purchase-plan
+```
+
+A successful delegated result stops at:
+
+```text
+purchase_ready_for_confirmation
+```
+
+No Razorpay order exists yet.
+
+The buyer must then explicitly call:
+
+```http
+POST /api/delegated-checkout/confirm
+```
+
+Only this confirmation may create/reuse the Razorpay order and consume the mandate authority.
 
 ## Tests and build checks
 
-Backend tests mock external service boundaries and should not make real Groq or Razorpay calls:
+Backend:
 
 ```bash
 python -m pytest backend/test -q
 ```
 
-Frontend checks:
+Frontend:
 
 ```bash
 npm --prefix frontend run lint
 npm --prefix frontend run build
 ```
 
-Current local verification snapshot:
+Current verification status:
 
-- 109 backend tests passed.
-- The frontend production build passed.
-- A complete Razorpay Test Mode payment was manually completed and verified by the backend.
-- There is no CI workflow yet, and the setup time has not yet been measured on a fresh machine.
-
-Note: `pytest.ini` currently points to `backend/tests`, while the committed suite is in `backend/test`. Use the explicit test command above until that configuration is corrected.
+- The full backend suite passed in GitHub Actions after the delegated-buyer work was added.
+- The delegated purchase flow was manually tested end to end through quote creation and buyer confirmation.
+- Frontend ESLint and the production Vite build passed during the earlier commerce-audit/payment-recovery phase.
+- Razorpay webhook recovery is implemented and automated-test verified; final production-style recovery testing remains a post-deployment check.
 
 ## API surface
+
+### Core commerce
 
 | Method | Endpoint | Purpose |
 |---|---|---|
 | `GET` | `/health` | Service health check |
-| `POST` | `/api/shop` | Extract intent and return base-product choices |
-| `POST` | `/api/shop/select-base` | Record the buyer’s offered base-product selection |
-| `POST` | `/api/shop/select-cross-sell` | Accept one offered add-on or explicitly decline |
-| `POST` | `/api/checkout/confirm` | Create or return the linked Razorpay order |
-| `POST` | `/api/payment/verify` | Verify the Razorpay signature and store the payment |
+| `POST` | `/api/shop` | Extract intent and return buyer-selectable products |
+| `GET` | `/api/shop/{session_id}/audit` | Read shopping-session audit history |
+| `POST` | `/api/shop/select-base` | Record buyer base-product selection |
+| `POST` | `/api/shop/select-cross-sell` | Accept or decline an offered add-on |
+| `POST` | `/api/checkout/confirm` | Buyer-confirm a normal-flow quote and create/reuse Razorpay order |
 
-## Local data
+### Mandates and delegated commerce
 
-- `backend/data/products.json` is the versioned demo catalog. Version `2.0.0` contains 33 products across eight categories, including deliberate inactive and out-of-stock cases.
-- `backend/data/cartpilot.db` is created automatically on first use. No seed script is necessary because the catalog is JSON and SQLite tables are created by the stores.
-- Set `CARTPILOT_DB_PATH` to use a different SQLite file, which is useful for isolated tests.
-- Database files, virtual environments, frontend builds, dependencies, and `.env` are ignored by Git.
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/api/mandates` | Create an immutable purchase mandate |
+| `GET` | `/api/mandates/{mandate_id}` | Read a mandate |
+| `GET` | `/api/mandates/{mandate_id}/audit` | Read mandate audit history |
+| `POST` | `/api/delegated-shop` | Run mandate-bound AI product selection and quote creation |
+| `POST` | `/api/delegated-checkout/confirm` | Buyer-confirm delegated quote and consume mandate authority |
+| `POST` | `/api/agent/purchase-plan` | Restricted external-agent purchase-plan capability |
+| `GET` | `/api/agent/executions/{execution_id}` | Read mandate execution state |
+| `GET` | `/api/agent/capabilities` | Describe allowed and prohibited external-agent capabilities |
+
+### Payments
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/api/payment/verify` | Verify browser callback signature and store payment |
+| `GET` | `/api/payment/status/{quote_id}` | Read payment/recovery status |
+| `POST` | `/api/payment/webhook` | Process a signed Razorpay webhook |
 
 ## Project layout
 
 ```text
 CartPilot/
 ├── backend/
-│   ├── app/                 # API, intent adapter, deterministic core, stores
-│   ├── data/products.json   # trusted VoltCart demo catalog
-│   ├── test/                # backend tests
+│   ├── app/
+│   │   ├── commerce_agent.py
+│   │   ├── delegated_buyer.py
+│   │   ├── delegated_api.py
+│   │   ├── mandate_execution_ledger.py
+│   │   ├── purchase_mandate_service.py
+│   │   ├── audit_events.py
+│   │   ├── payment_webhook.py
+│   │   ├── payment_status.py
+│   │   ├── main.py
+│   │   └── main_delegated.py
+│   ├── data/products.json
+│   ├── test/
 │   └── requirements.txt
 ├── frontend/
-│   ├── src/                 # React UI, API client, Razorpay helper
-│   ├── package.json
-│   └── package-lock.json
-├── .env.example
-├── pytest.ini
-└── ARCHITECTURE.md
+│   └── src/
+├── .github/workflows/
+├── ARCHITECTURE.md
+├── DELEGATED_BUYER.md
+└── README.md
 ```
 
 ## Known limits
 
-- Intended for a single local API process and Razorpay Test Mode only.
-- No user authentication, authorization, session ownership, rate limiting, or production deployment configuration.
-- The checkout lock is process-local; it does not prevent duplicate remote orders across multiple workers or process crashes.
-- Inventory is checked but not reserved or decremented.
-- Razorpay webhooks and reconciliation are not implemented.
-- The Test Mode key policy is documented but not enforced at startup.
-- The Groq call is required for the interactive shopping flow; there is no offline runtime fallback.
-- SQLite and the static JSON catalog are suitable for this demo, not distributed commerce.
-- Frontend shopping state is held in memory, so a page refresh does not restore the active flow.
+- Demo/Test Mode system; not production-ready.
+- No user authentication, account ownership checks, or production authorization model.
+- SQLite and a static JSON catalog are not suitable for distributed commerce.
+- Inventory is checked but not reserved/decremented as part of a distributed inventory transaction.
+- Multi-worker idempotency and process-crash recovery are not fully production hardened.
+- No refund/dispute lifecycle.
+- The delegated AI buyer still depends on the Groq model being available.
+- Final deployed webhook-recovery testing is still pending.
+- External-agent integration currently uses a restricted HTTP capability surface; it is not yet packaged as a dedicated MCP server.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the trust boundaries, state transitions, invariants, and production gaps.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for trust boundaries, invariants, state transitions, and production gaps. See [DELEGATED_BUYER.md](DELEGATED_BUYER.md) for the delegated-authority design in isolation.

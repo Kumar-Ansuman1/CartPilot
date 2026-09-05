@@ -22,6 +22,7 @@ import {
   acceptCrossSell,
   confirmCheckout,
   declineCrossSell,
+  getPaymentStatus,
   getShoppingAudit,
   selectBaseProduct,
   startShoppingSession,
@@ -38,6 +39,9 @@ const EXAMPLE_REQUESTS = [
   "iPhone 15 case under 1500 rupees",
   "Bluetooth earbuds under 3000 rupees",
 ];
+
+const PAYMENT_POLL_INTERVAL_MS = 2500;
+const MAX_PAYMENT_POLL_ATTEMPTS = 24;
 
 
 function formatMoney(amountPaise) {
@@ -538,6 +542,7 @@ function QuoteCard({
   isActive,
   paymentStatus,
   onCheckout,
+  onCheckPaymentStatus,
 }) {
   const {
     result,
@@ -552,12 +557,15 @@ function QuoteCard({
     creating_order: "Creating secure order…",
     opening_checkout: "Opening Razorpay…",
     verifying: "Verifying payment…",
+    confirmation_pending:
+      "Payment confirmation pending",
     success: "Payment verified",
+    recovered: "Payment recovered",
   };
 
-  const isProcessing = ![
-    "idle",
+  const isFinal = [
     "success",
+    "recovered",
   ].includes(paymentStatus);
 
   return (
@@ -650,12 +658,11 @@ function QuoteCard({
         type="button"
         disabled={
           !isActive ||
-          isProcessing ||
-          paymentStatus === "success"
+          paymentStatus !== "idle"
         }
         onClick={onCheckout}
       >
-        {paymentStatus === "success" ? (
+        {isFinal ? (
           <CheckCircle2 size={18} />
         ) : (
           <LockKeyhole size={18} />
@@ -663,6 +670,47 @@ function QuoteCard({
 
         {buttonLabels[paymentStatus]}
       </button>
+
+      {paymentStatus ===
+        "confirmation_pending" && (
+        <div
+          className="payment-pending"
+          role="status"
+        >
+          <Clock3 size={17} />
+
+          <div>
+            <strong>
+              Checkout completed. Waiting for
+              server confirmation.
+            </strong>
+
+            <p>
+              CartPilot is checking for a signed
+              Razorpay webhook. Do not pay again.
+            </p>
+
+            <button
+              type="button"
+              onClick={onCheckPaymentStatus}
+            >
+              Check payment status now
+            </button>
+          </div>
+        </div>
+      )}
+
+      {paymentStatus === "recovered" && (
+        <div className="payment-recovered">
+          <CheckCircle2 size={17} />
+
+          <span>
+            The signed Razorpay webhook recovered
+            this payment after the browser callback
+            was unavailable.
+          </span>
+        </div>
+      )}
 
       <p className="confirmation-note">
         Nothing is charged until you explicitly
@@ -731,6 +779,182 @@ function App() {
   const actionInFlightRef = useRef(false);
   const checkoutInFlightRef = useRef(false);
   const auditRequestIdRef = useRef(0);
+  const paymentPollTokenRef = useRef(0);
+  const paymentPollTimeoutRef = useRef(null);
+  const completedPaymentQuoteRef = useRef(null);
+
+  function stopPaymentPolling() {
+    paymentPollTokenRef.current += 1;
+
+    if (paymentPollTimeoutRef.current) {
+      window.clearTimeout(
+        paymentPollTimeoutRef.current
+      );
+      paymentPollTimeoutRef.current = null;
+    }
+  }
+
+  function completePayment(
+    quoteView,
+    paymentResult
+  ) {
+    stopPaymentPolling();
+
+    const quoteId =
+      quoteView.result.quote.quote_id;
+    const recovered =
+      paymentResult.verification_source ===
+      "webhook";
+
+    setPaymentStatus(
+      recovered ? "recovered" : "success"
+    );
+    setError("");
+
+    setActiveSession((current) => (
+      current
+        ? {
+            ...current,
+            stage: "payment_verified",
+          }
+        : current
+    ));
+
+    if (
+      completedPaymentQuoteRef.current !==
+      quoteId
+    ) {
+      completedPaymentQuoteRef.current = quoteId;
+      setMessages((current) => [
+        ...current,
+        {
+          id: createMessageId(
+            recovered
+              ? "payment-recovered"
+              : "success"
+          ),
+          role: "assistant",
+          text: recovered
+            ? (
+              "Payment recovered through a " +
+              "signed Razorpay webhook. " +
+              "Payment ID: " +
+              paymentResult.razorpay_payment_id
+            )
+            : (
+              "Payment verified successfully. " +
+              "Payment ID: " +
+              paymentResult.razorpay_payment_id
+            ),
+          success: true,
+        },
+      ]);
+    }
+
+    void refreshAudit(
+      quoteView.result.session_id
+    );
+  }
+
+  async function pollPaymentStatus(
+    quoteView,
+    token,
+    attempt
+  ) {
+    if (paymentPollTokenRef.current !== token) {
+      return;
+    }
+
+    try {
+      const statusResult =
+        await getPaymentStatus(
+          quoteView.result.quote.quote_id
+        );
+
+      if (paymentPollTokenRef.current !== token) {
+        return;
+      }
+
+      if (statusResult.status === "verified") {
+        completePayment(
+          quoteView,
+          statusResult
+        );
+        return;
+      }
+    } catch {
+      // A temporary network failure is expected in the recovery demo.
+      // Continue polling without replacing the commerce-flow error state.
+    }
+
+    if (
+      attempt + 1 >= MAX_PAYMENT_POLL_ATTEMPTS
+    ) {
+      setError(
+        "Payment confirmation is still pending. " +
+        "Do not pay again; use the status button " +
+        "after your connection returns."
+      );
+      return;
+    }
+
+    paymentPollTimeoutRef.current =
+      window.setTimeout(
+        () => {
+          void pollPaymentStatus(
+            quoteView,
+            token,
+            attempt + 1
+          );
+        },
+        PAYMENT_POLL_INTERVAL_MS
+      );
+  }
+
+  function startPaymentPolling(
+    quoteView,
+    showPendingMessage = false
+  ) {
+    stopPaymentPolling();
+    const token = paymentPollTokenRef.current;
+    setPaymentStatus("confirmation_pending");
+    setError("");
+
+    if (showPendingMessage) {
+      setMessages((current) => [
+        ...current,
+        {
+          id: createMessageId(
+            "confirmation-pending"
+          ),
+          role: "assistant",
+          text:
+            "Checkout completed, but the browser " +
+            "confirmation did not reach CartPilot. " +
+            "I will keep checking the server. " +
+            "Please do not pay again.",
+        },
+      ]);
+    }
+
+    void pollPaymentStatus(
+      quoteView,
+      token,
+      0
+    );
+  }
+
+  useEffect(() => (
+    () => {
+      paymentPollTokenRef.current += 1;
+
+      if (paymentPollTimeoutRef.current) {
+        window.clearTimeout(
+          paymentPollTimeoutRef.current
+        );
+      }
+    }
+  ), []);
 
   async function refreshAudit(sessionId) {
     if (!sessionId) {
@@ -824,6 +1048,8 @@ function App() {
     setPendingSku(null);
     setActiveSession(null);
     setActiveQuote(null);
+    stopPaymentPolling();
+    completedPaymentQuoteRef.current = null;
     auditRequestIdRef.current += 1;
     setAuditTimeline(null);
     setAuditStatus("idle");
@@ -1082,39 +1308,23 @@ function App() {
 
       setPaymentStatus("verifying");
 
-      const verifiedPayment =
-        await verifyPayment(
-          quoteView.result.quote.quote_id,
-          razorpayResponse
+      try {
+        const verifiedPayment =
+          await verifyPayment(
+            quoteView.result.quote.quote_id,
+            razorpayResponse
+          );
+
+        completePayment(
+          quoteView,
+          verifiedPayment
         );
-
-      setPaymentStatus("success");
-      void refreshAudit(
-        quoteView.result.session_id
-      );
-
-      setActiveSession((current) => (
-        current
-          ? {
-              ...current,
-              stage: "payment_verified",
-            }
-          : current
-      ));
-
-      setMessages((current) => [
-        ...current,
-        {
-          id: createMessageId("success"),
-          role: "assistant",
-          text:
-            "Payment verified successfully. " +
-            "Payment ID: " +
-            verifiedPayment
-              .razorpay_payment_id,
-          success: true,
-        },
-      ]);
+      } catch {
+        startPaymentPolling(
+          quoteView,
+          true
+        );
+      }
     } catch (checkoutError) {
       setPaymentStatus("idle");
       setError(checkoutError.message);
@@ -1126,9 +1336,10 @@ function App() {
     }
   }
 
-  const paymentIsProcessing = ![
-    "idle",
-    "success",
+  const paymentIsProcessing = [
+    "creating_order",
+    "opening_checkout",
+    "verifying",
   ].includes(paymentStatus);
 
   const inputIsDisabled =
@@ -1300,6 +1511,11 @@ function App() {
                         }
                         onCheckout={() =>
                           handleCheckout(
+                            message.quoteView
+                          )
+                        }
+                        onCheckPaymentStatus={() =>
+                          startPaymentPolling(
                             message.quoteView
                           )
                         }

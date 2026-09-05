@@ -15,7 +15,6 @@ from backend.app.config import get_settings
 from backend.app.quote_store import (
     StoredPayment,
     get_stored_quote_by_order_id,
-    get_verified_payment,
     save_verified_payment,
 )
 from backend.app.shopping_session_store import (
@@ -335,15 +334,12 @@ def process_razorpay_webhook(
             ),
         )
 
-    previous_payment = get_verified_payment(
-        stored_quote.quote.quote_id
-    )
-
     try:
         payment: StoredPayment = save_verified_payment(
             quote_id=stored_quote.quote.quote_id,
             razorpay_order_id=payment_entity.order_id,
             razorpay_payment_id=payment_entity.id,
+            verification_source="webhook",
         )
     except ValueError:
         reject(
@@ -355,7 +351,9 @@ def process_razorpay_webhook(
         )
 
     if session is not None:
-        recovered = previous_payment is None
+        recovered = (
+            payment.verification_source == "webhook"
+        )
         audit_subject = f"webhook:{cleaned_event_id}"
         audit_event_id = deterministic_audit_event_id(
             session_id=session.session_id,

@@ -9,6 +9,12 @@ from backend.app.models import Quote
 from sqlite3 import IntegrityError
 
 
+PaymentVerificationSource = Literal[
+    "browser_callback",
+    "webhook",
+]
+
+
 class StoredQuote(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -27,6 +33,9 @@ class StoredPayment(BaseModel):
     razorpay_order_id: str
     razorpay_payment_id: str
     status: Literal["verified"]
+    verification_source: PaymentVerificationSource = (
+        "browser_callback"
+    )
     verified_at: datetime
 
 class QuoteConflictError(Exception):
@@ -82,15 +91,45 @@ def initialize_quote_store() -> None:
             CREATE TABLE IF NOT EXISTS payments (
                 razorpay_payment_id TEXT PRIMARY KEY,
                 razorpay_order_id TEXT NOT NULL UNIQUE,
-            quote_id TEXT NOT NULL UNIQUE,
-            status TEXT NOT NULL
-            CHECK (status = 'verified'),
-            verified_at TEXT NOT NULL,
-            FOREIGN KEY (quote_id)
-            REFERENCES quotes (quote_id)
+                quote_id TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL
+                    CHECK (status = 'verified'),
+                verification_source TEXT NOT NULL
+                    DEFAULT 'browser_callback'
+                    CHECK (
+                        verification_source IN (
+                            'browser_callback',
+                            'webhook'
+                        )
+                    ),
+                verified_at TEXT NOT NULL,
+                FOREIGN KEY (quote_id)
+                    REFERENCES quotes (quote_id)
             )
             """
         )
+
+        payment_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(payments)"
+            ).fetchall()
+        }
+
+        if "verification_source" not in payment_columns:
+            connection.execute(
+                """
+                ALTER TABLE payments
+                ADD COLUMN verification_source TEXT NOT NULL
+                    DEFAULT 'browser_callback'
+                    CHECK (
+                        verification_source IN (
+                            'browser_callback',
+                            'webhook'
+                        )
+                    )
+                """
+            )
 
 
 def save_quote(quote: Quote) -> StoredQuote:
@@ -284,6 +323,7 @@ def get_verified_payment(
                 razorpay_order_id,
                 razorpay_payment_id,
                 status,
+                verification_source,
                 verified_at
             FROM payments
             WHERE quote_id = ?
@@ -299,7 +339,8 @@ def get_verified_payment(
         razorpay_order_id=row[1],
         razorpay_payment_id=row[2],
         status=row[3],
-        verified_at=datetime.fromisoformat(row[4]),
+        verification_source=row[4],
+        verified_at=datetime.fromisoformat(row[5]),
     )
 
 
@@ -308,6 +349,9 @@ def save_verified_payment(
     quote_id: str,
     razorpay_order_id: str,
     razorpay_payment_id: str,
+    verification_source: PaymentVerificationSource = (
+        "browser_callback"
+    ),
 ) -> StoredPayment:
     stored_quote = get_stored_quote(quote_id)
 
@@ -334,14 +378,16 @@ def save_verified_payment(
                 razorpay_order_id,
                 quote_id,
                 status,
+                verification_source,
                 verified_at
             )
-            VALUES (?, ?, ?, 'verified', ?)
+            VALUES (?, ?, ?, 'verified', ?, ?)
             """,
             (
                 razorpay_payment_id,
                 razorpay_order_id,
                 quote_id,
+                verification_source,
                 verified_at.isoformat(),
             ),
         )

@@ -36,6 +36,11 @@ from backend.app.payment_service import (
     PaymentStateError,
     verify_and_record_payment,
 )
+from backend.app.payment_status import (
+    PaymentStatusNotFoundError,
+    PaymentStatusResponse,
+    read_payment_status,
+)
 from backend.app.payment_webhook import (
     InvalidWebhookSignatureError,
     MalformedWebhookError,
@@ -491,6 +496,35 @@ def verify_payment(
                 "The payment response is invalid."
             ),
         ) from exc
+
+
+@app.get(
+    "/api/payment/status/{quote_id}",
+    response_model=PaymentStatusResponse,
+    summary="Read payment confirmation status",
+)
+def get_payment_status(
+    quote_id: Annotated[
+        str,
+        Path(pattern=r"^quote_[0-9a-f]{32}$"),
+    ],
+    response: Response,
+) -> PaymentStatusResponse:
+    try:
+        result = read_payment_status(quote_id)
+    except PaymentStatusNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="The payment quote was not found.",
+        ) from exc
+    except (SQLiteError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payment status is temporarily unavailable.",
+        ) from exc
+
+    response.headers["Cache-Control"] = "no-store"
+    return result
 
 
 @app.post(

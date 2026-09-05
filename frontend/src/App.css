@@ -692,6 +692,58 @@
   text-align: center;
 }
 
+.payment-pending,
+.payment-recovered {
+  margin-top: 12px;
+  padding: 12px;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border-radius: 11px;
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.payment-pending {
+  color: #725510;
+  background: #fff9e8;
+  border: 1px solid #eedb9d;
+}
+
+.payment-pending > svg,
+.payment-recovered > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.payment-pending strong {
+  display: block;
+  color: #5e450b;
+}
+
+.payment-pending p {
+  margin: 3px 0 0;
+}
+
+.payment-pending button {
+  margin-top: 7px;
+  padding: 0;
+  color: #60470c;
+  background: transparent;
+  border: 0;
+  font-size: 0.69rem;
+  font-weight: 850;
+  text-decoration: underline;
+}
+
+.payment-recovered {
+  align-items: center;
+  color: var(--green);
+  background: var(--green-soft);
+  border: 1px solid #ccebdd;
+  font-weight: 750;
+}
+
 .success-label {
   margin-top: 7px;
   display: inline-flex;

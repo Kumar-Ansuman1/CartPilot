@@ -68,6 +68,16 @@ export function getShoppingAudit(sessionId) {
 }
 
 
+export function getPaymentStatus(quoteId) {
+  return apiRequest(
+    `/api/payment/status/${encodeURIComponent(quoteId)}`,
+    {
+      method: "GET",
+    }
+  );
+}
+
+
 export function selectBaseProduct(
   sessionId,
   baseProductSku

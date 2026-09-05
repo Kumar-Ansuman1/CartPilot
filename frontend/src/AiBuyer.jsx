@@ -69,7 +69,7 @@ function AiBuyer() {
     "usb-c",
     "android",
   ]);
-  const [maxCrossSellPercentage, setMaxCrossSellPercentage] = useState(20);
+  const [maxCrossSellPercentage, setMaxCrossSellPercentage] = useState(0);
   const [expiresInMinutes, setExpiresInMinutes] = useState(30);
   const [buyerGoal, setBuyerGoal] = useState(
     "Choose a compact everyday charger with good value."
@@ -91,6 +91,7 @@ function AiBuyer() {
     "planning",
     "opening_checkout",
   ].includes(status);
+  const crossSellEnabled = Number(maxCrossSellPercentage) > 0;
 
   const canCreateMandate = useMemo(() => {
     const budget = Number(budgetRupees);
@@ -356,18 +357,32 @@ function AiBuyer() {
               </div>
             </fieldset>
 
+            <fieldset disabled={Boolean(mandate) || busy}>
+              <legend>Cross-sell permission</legend>
+              <label className="choice-chip">
+                <input
+                  type="checkbox"
+                  checked={crossSellEnabled}
+                  onChange={(event) =>
+                    setMaxCrossSellPercentage(event.target.checked ? 20 : 0)
+                  }
+                />
+                Allow AI to add one eligible companion
+              </label>
+            </fieldset>
+
             <div className="split-fields">
               <label>
-                Max cross-sell %
+                Max cross-sell % of budget
                 <input
                   type="number"
-                  min="0"
+                  min="1"
                   max="30"
                   value={maxCrossSellPercentage}
                   onChange={(event) =>
                     setMaxCrossSellPercentage(event.target.value)
                   }
-                  disabled={Boolean(mandate) || busy}
+                  disabled={Boolean(mandate) || busy || !crossSellEnabled}
                 />
               </label>
 

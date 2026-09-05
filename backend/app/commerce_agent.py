@@ -8,13 +8,18 @@ from pydantic import (
     model_validator,
 )
 
+from backend.app.audit_events import (
+    record_audit_event,
+)
 from backend.app.catalog import load_catalog
 from backend.app.intent_extractor import (
     extract_shopping_intent,
 )
 from backend.app.models import (
     ExtractedShoppingIntent,
+    Product,
     ProductOption,
+    ShoppingRequest,
 )
 from backend.app.recommender import (
     recommend_base_products,
@@ -112,6 +117,74 @@ class CommerceAgentResult(BaseModel):
         return self
 
 
+def _record_initial_audit_events(
+    *,
+    session_id: str,
+    request: ShoppingRequest,
+    base_products: list[Product],
+) -> None:
+    record_audit_event(
+        session_id=session_id,
+        event_type="intent_extracted",
+        subject="initial-intent",
+        actor="ai",
+        outcome="recorded",
+        reason_code="STRUCTURED_INTENT_VALIDATED",
+        explanation=(
+            "The AI output passed the strict shopping-intent "
+            "schema. It did not choose a product or perform "
+            "a money action."
+        ),
+    )
+
+    record_audit_event(
+        session_id=session_id,
+        event_type="catalog_searched",
+        subject="initial-catalog-search",
+        actor="deterministic_core",
+        outcome="allowed",
+        reason_code="TRUSTED_CATALOG_FILTER_APPLIED",
+        explanation=(
+            "The trusted catalog was filtered by stock, "
+            "budget, category and compatibility rules."
+        ),
+        amount_paise=request.budget_paise,
+        currency=request.currency,
+    )
+
+    for rank, product in enumerate(
+        base_products,
+        start=1,
+    ):
+        is_highest_ranked = rank == 1
+
+        record_audit_event(
+            session_id=session_id,
+            event_type="base_product_offered",
+            subject=f"base-offer:{product.sku}",
+            actor="deterministic_core",
+            outcome="allowed",
+            reason_code=(
+                "HIGHEST_RANKED_ELIGIBLE_OPTION"
+                if is_highest_ranked
+                else "ELIGIBLE_BASE_PRODUCT_OPTION"
+            ),
+            explanation=(
+                "This was the highest-ranked eligible "
+                "option, but the buyer must choose it."
+                if is_highest_ranked
+                else (
+                    "This product passed all deterministic "
+                    "eligibility checks and was offered as "
+                    "an alternative."
+                )
+            ),
+            sku=product.sku,
+            amount_paise=product.price_paise,
+            currency=request.currency,
+        )
+
+
 def run_commerce_agent(
     buyer_message: str,
 ) -> CommerceAgentResult:
@@ -177,6 +250,12 @@ def run_commerce_agent(
             product.sku
             for product in base_products
         ],
+    )
+
+    _record_initial_audit_events(
+        session_id=session.session_id,
+        request=request,
+        base_products=base_products,
     )
 
     recommended_product = base_products[0]

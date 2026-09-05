@@ -5,7 +5,13 @@ from typing import Literal
 import razorpay
 from pydantic import BaseModel, ConfigDict
 
+from backend.app.audit_events import (
+    new_audit_event,
+    record_audit_event,
+    save_audit_event_idempotently,
+)
 from backend.app.config import get_settings
+from backend.app.models import Quote
 from backend.app.quote_store import (
     get_stored_quote,
     mark_order_created,
@@ -80,6 +86,136 @@ def _build_checkout_result(
     )
 
 
+def _record_checkout_confirmation(
+    *,
+    session_id: str,
+    quote: Quote,
+) -> None:
+    record_audit_event(
+        session_id=session_id,
+        quote_id=quote.quote_id,
+        event_type="checkout_confirmed",
+        subject=f"checkout:{quote.quote_id}",
+        actor="buyer",
+        outcome="allowed",
+        reason_code="BUYER_CONFIRMED_CHECKOUT",
+        explanation=(
+            "The buyer explicitly confirmed the stored "
+            "quote before an order could be requested."
+        ),
+        amount_paise=quote.total_paise,
+        currency=quote.currency,
+    )
+
+
+def _append_order_creation_attempt(
+    *,
+    session_id: str,
+    quote: Quote,
+) -> None:
+    event = new_audit_event(
+        session_id=session_id,
+        quote_id=quote.quote_id,
+        event_type="order_creation_requested",
+        actor="deterministic_core",
+        outcome="recorded",
+        reason_code="RAZORPAY_ORDER_REQUESTED",
+        explanation=(
+            "The deterministic core requested one "
+            "Razorpay order using the immutable quote "
+            "amount and quote ID as its receipt."
+        ),
+        amount_paise=quote.total_paise,
+        currency=quote.currency,
+    )
+
+    save_audit_event_idempotently(event)
+
+
+def _record_order_failure(
+    *,
+    session_id: str,
+    quote: Quote,
+    reason_code: str,
+    explanation: str,
+) -> None:
+    event = new_audit_event(
+        session_id=session_id,
+        quote_id=quote.quote_id,
+        event_type="order_created",
+        actor="razorpay",
+        outcome="failed",
+        reason_code=reason_code,
+        explanation=explanation,
+        amount_paise=quote.total_paise,
+        currency=quote.currency,
+    )
+
+    save_audit_event_idempotently(event)
+
+
+def _record_validated_order(
+    *,
+    session_id: str,
+    quote: Quote,
+    razorpay_order_id: str,
+) -> None:
+    record_audit_event(
+        session_id=session_id,
+        quote_id=quote.quote_id,
+        event_type="order_created",
+        subject=f"order:{razorpay_order_id}",
+        actor="razorpay",
+        outcome="recorded",
+        reason_code="RAZORPAY_ORDER_RESPONSE_VALIDATED",
+        explanation=(
+            "The Razorpay order ID, amount, currency, "
+            "receipt and status matched the stored quote."
+        ),
+        amount_paise=quote.total_paise,
+        currency=quote.currency,
+        razorpay_order_id=razorpay_order_id,
+    )
+
+
+def _record_expired_quote_rejection(
+    *,
+    session_id: str,
+    quote: Quote,
+) -> None:
+    record_audit_event(
+        session_id=session_id,
+        quote_id=quote.quote_id,
+        event_type="quote_expired",
+        subject=f"quote-expired:{quote.quote_id}",
+        actor="deterministic_core",
+        outcome="recorded",
+        reason_code="QUOTE_TIME_LIMIT_REACHED",
+        explanation=(
+            "The quote reached its expiry time and "
+            "could no longer authorize checkout."
+        ),
+        amount_paise=quote.total_paise,
+        currency=quote.currency,
+    )
+
+    record_audit_event(
+        session_id=session_id,
+        quote_id=quote.quote_id,
+        event_type="checkout_confirmed",
+        subject=f"rejected-expired:{quote.quote_id}",
+        actor="buyer",
+        outcome="rejected",
+        reason_code="CHECKOUT_QUOTE_EXPIRED",
+        explanation=(
+            "Checkout confirmation was rejected because "
+            "the stored quote had expired."
+        ),
+        amount_paise=quote.total_paise,
+        currency=quote.currency,
+    )
+
+
 def create_checkout_order(
     quote_id: str,
 ) -> CheckoutOrder:
@@ -113,6 +249,31 @@ def create_checkout_order(
             or shopping_session.quote_id
             != cleaned_quote_id
         ):
+            if shopping_session is not None:
+                record_audit_event(
+                    session_id=(
+                        shopping_session.session_id
+                    ),
+                    quote_id=stored_quote.quote.quote_id,
+                    event_type="checkout_confirmed",
+                    subject=(
+                        "rejected-unlinked:"
+                        f"{stored_quote.quote.quote_id}"
+                    ),
+                    actor="buyer",
+                    outcome="rejected",
+                    reason_code="QUOTE_NOT_LINKED_TO_SESSION",
+                    explanation=(
+                        "Checkout confirmation was rejected "
+                        "because the quote was not linked to "
+                        "a completed shopping session."
+                    ),
+                    amount_paise=(
+                        stored_quote.quote.total_paise
+                    ),
+                    currency=stored_quote.quote.currency,
+                )
+
             raise QuoteNotLinkedError(
                 "Quote is not linked to a completed "
                 "shopping session."
@@ -124,9 +285,40 @@ def create_checkout_order(
         # instead of creating another Razorpay order.
         if stored_quote.status == "order_created":
             if stored_quote.razorpay_order_id is None:
+                record_audit_event(
+                    session_id=shopping_session.session_id,
+                    quote_id=quote.quote_id,
+                    event_type="order_created",
+                    subject=(
+                        "invalid-stored-order-state:"
+                        f"{quote.quote_id}"
+                    ),
+                    actor="deterministic_core",
+                    outcome="failed",
+                    reason_code="STORED_ORDER_ID_MISSING",
+                    explanation=(
+                        "The local quote state indicated an "
+                        "order, but no Razorpay order ID was "
+                        "stored."
+                    ),
+                    amount_paise=quote.total_paise,
+                    currency=quote.currency,
+                )
                 raise RazorpayOrderError(
                     "Stored order state is incomplete."
                 )
+
+            _record_checkout_confirmation(
+                session_id=shopping_session.session_id,
+                quote=quote,
+            )
+            _record_validated_order(
+                session_id=shopping_session.session_id,
+                quote=quote,
+                razorpay_order_id=(
+                    stored_quote.razorpay_order_id
+                ),
+            )
 
             return _build_checkout_result(
                 quote_id=quote.quote_id,
@@ -137,6 +329,10 @@ def create_checkout_order(
             )
 
         if stored_quote.status == "expired":
+            _record_expired_quote_rejection(
+                session_id=shopping_session.session_id,
+                quote=quote,
+            )
             raise QuoteExpiredError(
                 "Quote has expired."
             )
@@ -147,9 +343,22 @@ def create_checkout_order(
             mark_quote_expired(
                 quote.quote_id
             )
+            _record_expired_quote_rejection(
+                session_id=shopping_session.session_id,
+                quote=quote,
+            )
             raise QuoteExpiredError(
                 "Quote has expired."
             )
+
+        _record_checkout_confirmation(
+            session_id=shopping_session.session_id,
+            quote=quote,
+        )
+        _append_order_creation_attempt(
+            session_id=shopping_session.session_id,
+            quote=quote,
+        )
 
         payload = {
             "amount": quote.total_paise,
@@ -177,11 +386,30 @@ def create_checkout_order(
                 .order.create(payload)
             )
         except Exception as exc:
+            _record_order_failure(
+                session_id=shopping_session.session_id,
+                quote=quote,
+                reason_code="RAZORPAY_ORDER_REQUEST_FAILED",
+                explanation=(
+                    "The Razorpay order request failed "
+                    "before a valid order response was "
+                    "received."
+                ),
+            )
             raise RazorpayOrderError(
                 "Razorpay order creation failed."
             ) from exc
 
         if not isinstance(response, dict):
+            _record_order_failure(
+                session_id=shopping_session.session_id,
+                quote=quote,
+                reason_code="INVALID_RAZORPAY_RESPONSE",
+                explanation=(
+                    "Razorpay returned an order response "
+                    "with an invalid structure."
+                ),
+            )
             raise RazorpayOrderError(
                 "Razorpay returned an invalid response."
             )
@@ -194,6 +422,15 @@ def create_checkout_order(
                 "order_"
             )
         ):
+            _record_order_failure(
+                session_id=shopping_session.session_id,
+                quote=quote,
+                reason_code="INVALID_RAZORPAY_ORDER_ID",
+                explanation=(
+                    "Razorpay returned an invalid order ID, "
+                    "so the response was not stored."
+                ),
+            )
             raise RazorpayOrderError(
                 "Razorpay returned an invalid order ID."
             )
@@ -202,6 +439,15 @@ def create_checkout_order(
             response.get("amount")
             != quote.total_paise
         ):
+            _record_order_failure(
+                session_id=shopping_session.session_id,
+                quote=quote,
+                reason_code="RAZORPAY_ORDER_AMOUNT_MISMATCH",
+                explanation=(
+                    "The Razorpay order amount did not "
+                    "match the immutable quote amount."
+                ),
+            )
             raise RazorpayOrderError(
                 "Razorpay returned an unexpected amount."
             )
@@ -210,6 +456,15 @@ def create_checkout_order(
             response.get("currency")
             != quote.currency
         ):
+            _record_order_failure(
+                session_id=shopping_session.session_id,
+                quote=quote,
+                reason_code="RAZORPAY_ORDER_CURRENCY_MISMATCH",
+                explanation=(
+                    "The Razorpay order currency did not "
+                    "match the immutable quote currency."
+                ),
+            )
             raise RazorpayOrderError(
                 "Razorpay returned an unexpected currency."
             )
@@ -218,11 +473,29 @@ def create_checkout_order(
             response.get("receipt")
             != quote.quote_id
         ):
+            _record_order_failure(
+                session_id=shopping_session.session_id,
+                quote=quote,
+                reason_code="RAZORPAY_ORDER_RECEIPT_MISMATCH",
+                explanation=(
+                    "The Razorpay order receipt did not "
+                    "match the immutable quote ID."
+                ),
+            )
             raise RazorpayOrderError(
                 "Razorpay returned an unexpected receipt."
             )
 
         if response.get("status") != "created":
+            _record_order_failure(
+                session_id=shopping_session.session_id,
+                quote=quote,
+                reason_code="RAZORPAY_ORDER_STATUS_INVALID",
+                explanation=(
+                    "Razorpay did not return the required "
+                    "created order status."
+                ),
+            )
             raise RazorpayOrderError(
                 "Razorpay order was not "
                 "created successfully."
@@ -230,6 +503,12 @@ def create_checkout_order(
 
         mark_order_created(
             quote_id=quote.quote_id,
+            razorpay_order_id=razorpay_order_id,
+        )
+
+        _record_validated_order(
+            session_id=shopping_session.session_id,
+            quote=quote,
             razorpay_order_id=razorpay_order_id,
         )
 

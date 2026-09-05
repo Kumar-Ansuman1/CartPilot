@@ -7,8 +7,10 @@ import {
   Bot,
   CheckCircle2,
   Clock3,
+  History,
   LockKeyhole,
   PackageCheck,
+  RefreshCw,
   Send,
   ShieldCheck,
   ShoppingBag,
@@ -20,6 +22,7 @@ import {
   acceptCrossSell,
   confirmCheckout,
   declineCrossSell,
+  getShoppingAudit,
   selectBaseProduct,
   startShoppingSession,
   verifyPayment,
@@ -82,6 +85,168 @@ function DecisionDetails({ steps }) {
         ))}
       </ul>
     </details>
+  );
+}
+
+
+const AUDIT_ACTOR_LABELS = {
+  buyer: "You",
+  ai: "AI",
+  deterministic_core: "Commerce core",
+  razorpay: "Razorpay",
+};
+
+
+function AuditTimeline({
+  timeline,
+  status,
+  error,
+  onRefresh,
+}) {
+  const events = timeline?.events ?? [];
+
+  return (
+    <section
+      className="audit-panel"
+      aria-labelledby="audit-heading"
+    >
+      <div className="audit-heading">
+        <div>
+          <span className="eyebrow">
+            Commerce flight recorder
+          </span>
+
+          <h2 id="audit-heading">
+            Why did CartPilot do this?
+          </h2>
+        </div>
+
+        {timeline && (
+          <button
+            className="audit-refresh"
+            type="button"
+            onClick={onRefresh}
+            disabled={status === "loading"}
+            aria-label="Refresh audit timeline"
+            title="Refresh audit timeline"
+          >
+            <RefreshCw
+              size={16}
+              className={
+                status === "loading"
+                  ? "is-spinning"
+                  : ""
+              }
+            />
+          </button>
+        )}
+      </div>
+
+      {!timeline && status === "idle" && (
+        <div className="audit-empty">
+          <History size={20} />
+
+          <p>
+            Start a shopping request to see each
+            AI, buyer, policy and payment action.
+          </p>
+        </div>
+      )}
+
+      {!timeline && status === "loading" && (
+        <p
+          className="audit-status"
+          role="status"
+        >
+          Loading the decision history…
+        </p>
+      )}
+
+      {timeline && (
+        <ol className="audit-events">
+          {events.map((event) => (
+            <li
+              className={
+                `audit-event ${event.outcome}`
+              }
+              key={event.event_id}
+            >
+              <span
+                className="audit-marker"
+                aria-hidden="true"
+              >
+                {event.outcome === "rejected" ||
+                event.outcome === "failed"
+                  ? "!"
+                  : "✓"}
+              </span>
+
+              <div>
+                <div className="audit-event-meta">
+                  <span>
+                    {AUDIT_ACTOR_LABELS[
+                      event.actor
+                    ] ?? event.actor}
+                  </span>
+
+                  <time
+                    dateTime={event.created_at}
+                  >
+                    {formatTime(event.created_at)}
+                  </time>
+                </div>
+
+                <p>{event.explanation}</p>
+
+                <div className="audit-event-details">
+                  <code>{event.reason_code}</code>
+
+                  {event.amount_paise !== null &&
+                    event.amount_paise !==
+                      undefined && (
+                      <strong>
+                        {formatMoney(
+                          event.amount_paise
+                        )}
+                      </strong>
+                    )}
+                </div>
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+
+      {timeline && events.length === 0 && (
+        <p className="audit-status">
+          No events have been recorded yet.
+        </p>
+      )}
+
+      {error && (
+        <div
+          className="audit-error"
+          role="status"
+        >
+          <p>{error}</p>
+
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={status === "loading"}
+          >
+            Try again
+          </button>
+        </div>
+      )}
+
+      {timeline?.quote_id && (
+        <p className="audit-quote-link">
+          Linked to quote{" "}
+          <code>{timeline.quote_id}</code>
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -554,10 +719,51 @@ function App() {
 
   const [error, setError] = useState("");
 
+  const [auditTimeline, setAuditTimeline] =
+    useState(null);
+  const [auditStatus, setAuditStatus] =
+    useState("idle");
+  const [auditError, setAuditError] =
+    useState("");
+
   const messagesContainerRef = useRef(null);
   const requestInFlightRef = useRef(false);
   const actionInFlightRef = useRef(false);
   const checkoutInFlightRef = useRef(false);
+  const auditRequestIdRef = useRef(0);
+
+  async function refreshAudit(sessionId) {
+    if (!sessionId) {
+      return;
+    }
+
+    const requestId =
+      auditRequestIdRef.current + 1;
+    auditRequestIdRef.current = requestId;
+    setAuditStatus("loading");
+    setAuditError("");
+
+    try {
+      const timeline =
+        await getShoppingAudit(sessionId);
+
+      if (
+        auditRequestIdRef.current === requestId
+      ) {
+        setAuditTimeline(timeline);
+        setAuditStatus("success");
+      }
+    } catch (auditRequestError) {
+      if (
+        auditRequestIdRef.current === requestId
+      ) {
+        setAuditStatus("error");
+        setAuditError(
+          auditRequestError.message
+        );
+      }
+    }
+  }
 
   useEffect(() => {
     const container =
@@ -618,6 +824,10 @@ function App() {
     setPendingSku(null);
     setActiveSession(null);
     setActiveQuote(null);
+    auditRequestIdRef.current += 1;
+    setAuditTimeline(null);
+    setAuditStatus("idle");
+    setAuditError("");
 
     try {
       const result =
@@ -678,6 +888,7 @@ function App() {
         sessionId: result.session_id,
         stage: "base_selection",
       });
+      void refreshAudit(result.session_id);
 
       setMessages((current) => [
         ...current,
@@ -730,6 +941,9 @@ function App() {
           selectionResult.session_id,
         stage: "cross_sell_decision",
       });
+      void refreshAudit(
+        selectionResult.session_id
+      );
 
       setMessages((current) => [
         ...current,
@@ -745,6 +959,7 @@ function App() {
       ]);
     } catch (selectionError) {
       setError(selectionError.message);
+      void refreshAudit(result.session_id);
     } finally {
       actionInFlightRef.current = false;
       setSelectionStatus("idle");
@@ -800,6 +1015,9 @@ function App() {
         sessionId: quoteResult.session_id,
         stage: "quote_review",
       });
+      void refreshAudit(
+        quoteResult.session_id
+      );
       setActiveQuote(quoteView);
       setPaymentStatus("idle");
 
@@ -814,6 +1032,7 @@ function App() {
       ]);
     } catch (selectionError) {
       setError(selectionError.message);
+      void refreshAudit(result.session_id);
     } finally {
       actionInFlightRef.current = false;
       setSelectionStatus("idle");
@@ -846,6 +1065,10 @@ function App() {
           quoteView.result.quote.quote_id
         );
 
+      void refreshAudit(
+        quoteView.result.session_id
+      );
+
       setPaymentStatus(
         "opening_checkout"
       );
@@ -866,6 +1089,9 @@ function App() {
         );
 
       setPaymentStatus("success");
+      void refreshAudit(
+        quoteView.result.session_id
+      );
 
       setActiveSession((current) => (
         current
@@ -892,6 +1118,9 @@ function App() {
     } catch (checkoutError) {
       setPaymentStatus("idle");
       setError(checkoutError.message);
+      void refreshAudit(
+        quoteView.result.session_id
+      );
     } finally {
       checkoutInFlightRef.current = false;
     }
@@ -1171,7 +1400,8 @@ function App() {
             </div>
           </section>
 
-          <aside className="safety-panel">
+          <aside className="insight-column">
+            <section className="safety-panel">
             <span className="eyebrow">
               Control layer
             </span>
@@ -1235,6 +1465,19 @@ function App() {
               <span>AI may not</span>
               <strong>Control money</strong>
             </div>
+            </section>
+
+            <AuditTimeline
+              timeline={auditTimeline}
+              status={auditStatus}
+              error={auditError}
+              onRefresh={() =>
+                refreshAudit(
+                  auditTimeline?.session_id ??
+                    activeSession?.sessionId
+                )
+              }
+            />
           </aside>
         </div>
       </section>

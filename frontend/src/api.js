@@ -58,6 +58,16 @@ export function startShoppingSession(message) {
 }
 
 
+export function getShoppingAudit(sessionId) {
+  return apiRequest(
+    `/api/shop/${encodeURIComponent(sessionId)}/audit`,
+    {
+      method: "GET",
+    }
+  );
+}
+
+
 export function selectBaseProduct(
   sessionId,
   baseProductSku

@@ -1,10 +1,22 @@
+import re
+from datetime import datetime
+
 import razorpay
 
+from backend.app.audit_events import (
+    AuditActor,
+    AuditEventType,
+    AuditOutcome,
+    record_audit_event,
+)
 from backend.app.config import get_settings
 from backend.app.quote_store import (
     StoredPayment,
     get_stored_quote,
     save_verified_payment,
+)
+from backend.app.shopping_session_store import (
+    get_shopping_session_by_quote_id,
 )
 
 
@@ -46,10 +58,10 @@ def verify_and_record_payment(
     cleaned_payment_id = razorpay_payment_id.strip()
     cleaned_signature = razorpay_signature.strip()
 
-    if not cleaned_order_id.startswith("order_"):
+    if not re.fullmatch(r"order_[A-Za-z0-9]+", cleaned_order_id):
         raise ValueError("Invalid Razorpay order ID.")
 
-    if not cleaned_payment_id.startswith("pay_"):
+    if not re.fullmatch(r"pay_[A-Za-z0-9]+", cleaned_payment_id):
         raise ValueError("Invalid Razorpay payment ID.")
 
     if (
@@ -68,7 +80,64 @@ def verify_and_record_payment(
             "The payment quote was not found."
         )
 
+    shopping_session = get_shopping_session_by_quote_id(
+        stored_quote.quote.quote_id
+    )
+
+    def record_payment_event(
+        *,
+        event_type: AuditEventType,
+        actor: AuditActor = "deterministic_core",
+        outcome: AuditOutcome,
+        reason_code: str,
+        explanation: str,
+        created_at: datetime | None = None,
+    ) -> None:
+        # Older directly stored quotes may have no shopping session.
+        # Preserve their verification behavior without inventing an owner.
+        if shopping_session is None:
+            return
+
+        record_audit_event(
+            session_id=shopping_session.session_id,
+            quote_id=stored_quote.quote.quote_id,
+            event_type=event_type,
+            subject=(
+                f"{reason_code}:{cleaned_order_id}:{cleaned_payment_id}"
+            ),
+            actor=actor,
+            outcome=outcome,
+            reason_code=reason_code,
+            explanation=explanation,
+            # These are quote terms, not a fetched payment amount.
+            amount_paise=stored_quote.quote.total_paise,
+            currency=stored_quote.quote.currency,
+            razorpay_order_id=cleaned_order_id,
+            razorpay_payment_id=cleaned_payment_id,
+            created_at=created_at,
+        )
+
+    record_payment_event(
+        event_type="payment_verification_requested",
+        actor="buyer",
+        outcome="recorded",
+        reason_code="PAYMENT_VERIFICATION_REQUESTED",
+        explanation=(
+            "The buyer submitted a payment callback for server-side "
+            "order and signature verification."
+        ),
+    )
+
     if stored_quote.status != "order_created":
+        record_payment_event(
+            event_type="payment_rejected",
+            outcome="rejected",
+            reason_code="PAYMENT_ORDER_NOT_CREATED",
+            explanation=(
+                "Payment verification was rejected because the quote "
+                "does not have a created Razorpay order."
+            ),
+        )
         raise PaymentStateError(
             "The quote does not have a Razorpay order."
         )
@@ -76,13 +145,21 @@ def verify_and_record_payment(
     # Compare against our server-stored order ID, not an ID
     # supplied only by the frontend.
     if stored_quote.razorpay_order_id != cleaned_order_id:
+        record_payment_event(
+            event_type="payment_rejected",
+            outcome="rejected",
+            reason_code="PAYMENT_ORDER_ID_MISMATCH",
+            explanation=(
+                "The callback order ID did not match the server-stored "
+                "order for this quote."
+            ),
+        )
         raise PaymentStateError(
             "The Razorpay order ID does not match the stored order."
         )
 
-    client = _create_razorpay_client()
-
     try:
+        client = _create_razorpay_client()
         verified = client.utility.verify_payment_signature(
             {
                 "razorpay_order_id": (
@@ -93,17 +170,75 @@ def verify_and_record_payment(
             }
         )
     except razorpay.errors.SignatureVerificationError as exc:
+        record_payment_event(
+            event_type="payment_rejected",
+            outcome="rejected",
+            reason_code="PAYMENT_SIGNATURE_INVALID",
+            explanation=(
+                "The callback signature failed verification against "
+                "the server-stored order ID."
+            ),
+        )
         raise InvalidPaymentSignatureError(
             "Payment signature verification failed."
         ) from exc
+    except Exception:
+        record_payment_event(
+            event_type="payment_rejected",
+            outcome="failed",
+            reason_code="PAYMENT_VERIFICATION_ERROR",
+            explanation=(
+                "The signature verifier could not complete. "
+                "This attempt did not record a verified payment."
+            ),
+        )
+        raise
 
     if verified is not True:
+        record_payment_event(
+            event_type="payment_rejected",
+            outcome="rejected",
+            reason_code="PAYMENT_SIGNATURE_INVALID",
+            explanation=(
+                "The callback signature failed verification against "
+                "the server-stored order ID."
+            ),
+        )
         raise InvalidPaymentSignatureError(
             "Payment signature verification failed."
         )
 
-    return save_verified_payment(
-        quote_id=stored_quote.quote.quote_id,
-        razorpay_order_id=stored_quote.razorpay_order_id,
-        razorpay_payment_id=cleaned_payment_id,
+    try:
+        payment = save_verified_payment(
+            quote_id=stored_quote.quote.quote_id,
+            razorpay_order_id=stored_quote.razorpay_order_id,
+            razorpay_payment_id=cleaned_payment_id,
+        )
+    except ValueError:
+        record_payment_event(
+            event_type="payment_rejected",
+            outcome="rejected",
+            reason_code="PAYMENT_RECORD_CONFLICT",
+            explanation=(
+                "The verified callback could not be recorded because "
+                "it conflicted with the stored quote or payment."
+            ),
+        )
+        raise
+
+    # Run signature verification on every retry, then reuse the original
+    # payment and event. A retry also repairs a missing success audit event
+    # if its write failed after the payment was committed.
+    record_payment_event(
+        event_type="payment_verified",
+        outcome="recorded",
+        reason_code="PAYMENT_SIGNATURE_VERIFIED",
+        explanation=(
+            "The callback signature was verified against the server-stored "
+            "order ID and the payment record was saved. "
+            "Capture status has not been checked."
+        ),
+        created_at=payment.verified_at,
     )
+
+    return payment

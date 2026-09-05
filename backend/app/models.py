@@ -153,6 +153,94 @@ CompatibilityTag = Literal[
 ]
 
 
+class PurchaseMandate(BaseModel):
+    """Immutable limits approved by a buyer for delegated shopping."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+    )
+
+    mandate_id: str = Field(
+        pattern=r"^mandate_[0-9a-f]{32}$"
+    )
+    budget_paise: int = Field(gt=0, le=500_000)
+    currency: Literal["INR"] = "INR"
+    allowed_categories: tuple[ProductCategory, ...] = Field(
+        min_length=1,
+    )
+    required_compatibility: tuple[CompatibilityTag, ...] = ()
+    max_cross_sell_percentage: int = Field(
+        default=20,
+        ge=0,
+        le=30,
+    )
+    checkout_confirmation_required: Literal[True] = True
+    buyer_goal: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=500,
+    )
+    created_at: datetime
+    expires_at: datetime
+
+    @field_validator(
+        "allowed_categories",
+        "required_compatibility",
+        mode="before",
+    )
+    @classmethod
+    def normalize_mandate_terms(
+        cls,
+        values: object,
+    ) -> tuple[str, ...]:
+        if not isinstance(values, (list, tuple)):
+            raise ValueError("Mandate terms must be a list.")
+
+        normalized: list[str] = []
+        for value in values:
+            if not isinstance(value, str):
+                raise ValueError(
+                    "Mandate terms must be strings."
+                )
+            cleaned = value.strip().lower()
+            if cleaned and cleaned not in normalized:
+                normalized.append(cleaned)
+
+        return tuple(normalized)
+
+    @field_validator("buyer_goal")
+    @classmethod
+    def clean_buyer_goal(
+        cls,
+        value: str | None,
+    ) -> str | None:
+        if value is None:
+            return None
+
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Buyer goal cannot be empty.")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_mandate(self) -> "PurchaseMandate":
+        if (
+            self.created_at.tzinfo is None
+            or self.expires_at.tzinfo is None
+        ):
+            raise ValueError(
+                "Mandate timestamps must include timezone information."
+            )
+
+        if self.expires_at <= self.created_at:
+            raise ValueError(
+                "Mandate expiry must be after creation time."
+            )
+
+        return self
+
+
 class ExtractedShoppingIntent(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

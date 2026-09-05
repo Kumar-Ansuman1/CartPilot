@@ -1,3 +1,5 @@
+import json
+import sqlite3
 from datetime import datetime, timezone
 
 import pytest
@@ -8,11 +10,14 @@ from backend.app.audit_events import (
     AuditEventConflictError,
     deterministic_audit_event_id,
     get_audit_event,
+    initialize_audit_event_store,
     list_audit_events,
+    list_mandate_audit_events,
     list_quote_audit_events,
     new_audit_event,
     save_audit_event_idempotently,
 )
+from backend.app.database import get_database_path
 
 
 SESSION_ID = (
@@ -236,3 +241,75 @@ def test_session_queries_are_isolated() -> None:
     assert list_audit_events(OTHER_SESSION_ID) == [
         second_event
     ]
+
+
+def test_mandate_scoped_event_does_not_require_session() -> None:
+    mandate_id = (
+        "mandate_00000000000000000000000000000001"
+    )
+    event = new_audit_event(
+        event_id="audit_00000000000000000000000000000003",
+        mandate_id=mandate_id,
+        event_type="mandate_created",
+        actor="buyer",
+        outcome="recorded",
+        reason_code="BUYER_APPROVED_MANDATE",
+        explanation="The buyer approved the mandate.",
+        created_at=CREATED_AT,
+    )
+
+    save_audit_event_idempotently(event)
+
+    assert event.session_id is None
+    assert list_mandate_audit_events(mandate_id) == [event]
+    assert list_audit_events(SESSION_ID) == []
+
+
+def test_existing_ledger_schema_is_migrated_without_data_loss() -> None:
+    event = make_event()
+    payload = event.model_dump(mode="json")
+    payload.pop("mandate_id")
+
+    with sqlite3.connect(get_database_path()) as connection:
+        connection.execute(
+            """
+            CREATE TABLE audit_events (
+                sequence_number INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL UNIQUE,
+                session_id TEXT NOT NULL,
+                quote_id TEXT,
+                event_type TEXT NOT NULL,
+                event_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO audit_events (
+                event_id, session_id, quote_id, event_type,
+                event_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event.event_id,
+                event.session_id,
+                event.quote_id,
+                event.event_type,
+                json.dumps(payload),
+                event.created_at.isoformat(),
+            ),
+        )
+
+    initialize_audit_event_store()
+
+    assert list_audit_events(SESSION_ID) == [event]
+    with sqlite3.connect(get_database_path()) as connection:
+        columns = connection.execute(
+            "PRAGMA table_info(audit_events)"
+        ).fetchall()
+
+    columns_by_name = {row[1]: row for row in columns}
+    assert "mandate_id" in columns_by_name
+    assert columns_by_name["session_id"][3] == 0

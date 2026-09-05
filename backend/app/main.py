@@ -17,7 +17,11 @@ from pydantic import (
     model_validator,
 )
 
-from backend.app.audit_events import AuditEvent, list_audit_events
+from backend.app.audit_events import (
+    AuditEvent,
+    list_audit_events,
+    list_mandate_audit_events,
+)
 from backend.app.checkout_service import (
     CheckoutOrder,
     QuoteExpiredError,
@@ -49,6 +53,17 @@ from backend.app.payment_webhook import (
     WebhookStateError,
     process_razorpay_webhook,
 )
+from backend.app.models import (
+    CompatibilityTag,
+    ProductCategory,
+    PurchaseMandate,
+)
+from backend.app.purchase_mandate_service import (
+    create_purchase_mandate,
+)
+from backend.app.purchase_mandate_store import (
+    get_purchase_mandate,
+)
 from backend.app.quote_store import StoredPayment
 from backend.app.selection_service import (
     BaseProductUnavailableError,
@@ -79,6 +94,43 @@ class ShoppingSessionAuditResponse(BaseModel):
         pattern=r"^quote_[0-9a-f]{32}$",
     )
     events: list[AuditEvent]
+
+
+class PurchaseMandateAuditResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mandate_id: str = Field(
+        pattern=r"^mandate_[0-9a-f]{32}$"
+    )
+    events: list[AuditEvent]
+
+
+class PurchaseMandateCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    budget_paise: int = Field(gt=0, le=500_000)
+    allowed_categories: list[ProductCategory] = Field(
+        min_length=1,
+    )
+    required_compatibility: list[CompatibilityTag] = Field(
+        default_factory=list,
+    )
+    max_cross_sell_percentage: int = Field(
+        default=20,
+        ge=0,
+        le=30,
+    )
+    expires_in_minutes: int = Field(
+        default=30,
+        ge=1,
+        le=1_440,
+    )
+    checkout_confirmation_required: Literal[True] = True
+    buyer_goal: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=500,
+    )
 
 
 class BuyerMessageRequest(BaseModel):
@@ -185,6 +237,99 @@ app.add_middleware(
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post(
+    "/api/mandates",
+    response_model=PurchaseMandate,
+    status_code=201,
+    summary="Create an immutable buyer purchase mandate",
+)
+def create_mandate(
+    request: PurchaseMandateCreateRequest,
+) -> PurchaseMandate:
+    try:
+        return create_purchase_mandate(
+            budget_paise=request.budget_paise,
+            allowed_categories=request.allowed_categories,
+            required_compatibility=(
+                request.required_compatibility
+            ),
+            max_cross_sell_percentage=(
+                request.max_cross_sell_percentage
+            ),
+            expires_in_minutes=request.expires_in_minutes,
+            checkout_confirmation_required=(
+                request.checkout_confirmation_required
+            ),
+            buyer_goal=request.buyer_goal,
+        )
+    except (SQLiteError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="The purchase mandate could not be stored.",
+        ) from exc
+
+
+@app.get(
+    "/api/mandates/{mandate_id}",
+    response_model=PurchaseMandate,
+    summary="Read an immutable buyer purchase mandate",
+)
+def get_mandate(
+    mandate_id: Annotated[
+        str, Path(pattern=r"^mandate_[0-9a-f]{32}$")
+    ],
+    response: Response,
+) -> PurchaseMandate:
+    try:
+        mandate = get_purchase_mandate(mandate_id)
+    except (SQLiteError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="The purchase mandate is temporarily unavailable.",
+        ) from exc
+
+    if mandate is None:
+        raise HTTPException(
+            status_code=404,
+            detail="The purchase mandate was not found.",
+        )
+
+    response.headers["Cache-Control"] = "no-store"
+    return mandate
+
+
+@app.get(
+    "/api/mandates/{mandate_id}/audit",
+    response_model=PurchaseMandateAuditResponse,
+    summary="Read a purchase mandate's audit timeline",
+)
+def get_mandate_audit(
+    mandate_id: Annotated[
+        str, Path(pattern=r"^mandate_[0-9a-f]{32}$")
+    ],
+    response: Response,
+) -> PurchaseMandateAuditResponse:
+    try:
+        mandate = get_purchase_mandate(mandate_id)
+        if mandate is None:
+            raise HTTPException(
+                status_code=404,
+                detail="The purchase mandate was not found.",
+            )
+        result = PurchaseMandateAuditResponse(
+            mandate_id=mandate_id,
+            events=list_mandate_audit_events(mandate_id),
+        )
+    except (SQLiteError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="The mandate audit timeline is temporarily unavailable.",
+        ) from exc
+
+    response.headers["Cache-Control"] = "no-store"
+    return result
 
 
 @app.post(

@@ -150,6 +150,33 @@ def get_stored_quote(
         razorpay_order_id=razorpay_order_id,
     )
 
+
+def get_stored_quote_by_order_id(
+    razorpay_order_id: str,
+) -> StoredQuote | None:
+    initialize_quote_store()
+
+    with database_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT quote_json, status, razorpay_order_id
+            FROM quotes
+            WHERE razorpay_order_id = ?
+            """,
+            (razorpay_order_id,),
+        ).fetchone()
+
+    if row is None:
+        return None
+
+    quote_json, status, stored_order_id = row
+
+    return StoredQuote(
+        quote=Quote.model_validate_json(quote_json),
+        status=status,
+        razorpay_order_id=stored_order_id,
+    )
+
 def save_quote_idempotently(
     quote: Quote,
 ) -> StoredQuote:

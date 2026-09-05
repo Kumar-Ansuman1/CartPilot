@@ -1,7 +1,14 @@
 from sqlite3 import Error as SQLiteError
 from typing import Annotated, Literal
 
-from fastapi import FastAPI, HTTPException, Path, Response
+from fastapi import (
+    FastAPI,
+    Header,
+    HTTPException,
+    Path,
+    Request,
+    Response,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import (
     BaseModel,
@@ -29,6 +36,14 @@ from backend.app.payment_service import (
     PaymentStateError,
     verify_and_record_payment,
 )
+from backend.app.payment_webhook import (
+    InvalidWebhookSignatureError,
+    MalformedWebhookError,
+    WebhookConfigurationError,
+    WebhookProcessingResult,
+    WebhookStateError,
+    process_razorpay_webhook,
+)
 from backend.app.quote_store import StoredPayment
 from backend.app.selection_service import (
     BaseProductUnavailableError,
@@ -45,6 +60,7 @@ from backend.app.shopping_session_store import (
     ShoppingSessionStateError,
     get_shopping_session,
 )
+from backend.app.webhook_store import WebhookEventConflictError
 
 
 class ShoppingSessionAuditResponse(BaseModel):
@@ -474,4 +490,70 @@ def verify_payment(
             detail=(
                 "The payment response is invalid."
             ),
+        ) from exc
+
+
+@app.post(
+    "/api/payment/webhook",
+    response_model=WebhookProcessingResult,
+    summary="Process a signed Razorpay webhook",
+)
+async def razorpay_webhook(
+    request: Request,
+    x_razorpay_signature: Annotated[
+        str | None,
+        Header(alias="X-Razorpay-Signature"),
+    ] = None,
+    x_razorpay_event_id: Annotated[
+        str | None,
+        Header(alias="X-Razorpay-Event-Id"),
+    ] = None,
+) -> WebhookProcessingResult:
+    if x_razorpay_signature is None:
+        raise HTTPException(
+            status_code=400,
+            detail="The Razorpay webhook signature is required.",
+        )
+
+    if x_razorpay_event_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="The Razorpay webhook event ID is required.",
+        )
+
+    raw_body = await request.body()
+
+    try:
+        return process_razorpay_webhook(
+            raw_body=raw_body,
+            signature=x_razorpay_signature,
+            event_id=x_razorpay_event_id,
+        )
+    except InvalidWebhookSignatureError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="The Razorpay webhook signature is invalid.",
+        ) from exc
+    except MalformedWebhookError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="The Razorpay webhook payload is invalid.",
+        ) from exc
+    except (
+        WebhookStateError,
+        WebhookEventConflictError,
+    ) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="The Razorpay webhook conflicts with stored payment state.",
+        ) from exc
+    except WebhookConfigurationError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Razorpay webhook processing is not configured.",
+        ) from exc
+    except (SQLiteError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Razorpay webhook processing is temporarily unavailable.",
         ) from exc

@@ -22,6 +22,11 @@ AuditActor = Literal[
 ]
 
 AuditEventType = Literal[
+    "mandate_created",
+    "mandate_accepted",
+    "mandate_rejected",
+    "mandate_expired",
+    "mandate_policy_violated",
     "intent_extracted",
     "catalog_searched",
     "base_product_offered",
@@ -59,8 +64,13 @@ class AuditEvent(BaseModel):
     event_id: str = Field(
         pattern=r"^audit_[0-9a-f]{32}$"
     )
-    session_id: str = Field(
+    session_id: str | None = Field(
+        default=None,
         pattern=r"^session_[0-9a-f]{32}$"
+    )
+    mandate_id: str | None = Field(
+        default=None,
+        pattern=r"^mandate_[0-9a-f]{32}$",
     )
     quote_id: str | None = Field(
         default=None,
@@ -117,6 +127,11 @@ class AuditEvent(BaseModel):
 
     @model_validator(mode="after")
     def validate_event(self) -> "AuditEvent":
+        if self.session_id is None and self.mandate_id is None:
+            raise ValueError(
+                "An audit event requires a session or mandate ID."
+            )
+
         has_amount = self.amount_paise is not None
         has_currency = self.currency is not None
 
@@ -141,13 +156,20 @@ class AuditEventConflictError(Exception):
 
 def deterministic_audit_event_id(
     *,
-    session_id: str,
+    session_id: str | None = None,
+    mandate_id: str | None = None,
     event_type: AuditEventType,
     subject: str,
 ) -> str:
+    scope_id = session_id or mandate_id
+    if scope_id is None:
+        raise ValueError(
+            "An audit event requires a session or mandate ID."
+        )
+
     event_key = "\x1f".join(
         (
-            session_id,
+            scope_id,
             event_type,
             subject,
         )
@@ -161,7 +183,8 @@ def deterministic_audit_event_id(
 
 def new_audit_event(
     *,
-    session_id: str,
+    session_id: str | None = None,
+    mandate_id: str | None = None,
     event_type: AuditEventType,
     actor: AuditActor,
     outcome: AuditOutcome,
@@ -179,6 +202,7 @@ def new_audit_event(
     return AuditEvent(
         event_id=event_id or f"audit_{uuid4().hex}",
         session_id=session_id,
+        mandate_id=mandate_id,
         quote_id=quote_id,
         event_type=event_type,
         actor=actor,
@@ -199,16 +223,97 @@ def new_audit_event(
 
 def initialize_audit_event_store() -> None:
     with database_connection() as connection:
+        existing_columns = connection.execute(
+            "PRAGMA table_info(audit_events)"
+        ).fetchall()
+
+        if existing_columns:
+            columns_by_name = {
+                row[1]: row for row in existing_columns
+            }
+            session_is_required = bool(
+                columns_by_name["session_id"][3]
+            )
+            mandate_is_missing = (
+                "mandate_id" not in columns_by_name
+            )
+
+            if session_is_required or mandate_is_missing:
+                connection.execute(
+                    "ALTER TABLE audit_events "
+                    "RENAME TO audit_events_legacy"
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE audit_events (
+                        sequence_number INTEGER PRIMARY KEY AUTOINCREMENT,
+                        event_id TEXT NOT NULL UNIQUE,
+                        session_id TEXT,
+                        mandate_id TEXT,
+                        quote_id TEXT,
+                        event_type TEXT NOT NULL,
+                        event_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        CHECK (
+                            session_id IS NOT NULL
+                            OR mandate_id IS NOT NULL
+                        )
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO audit_events (
+                        sequence_number,
+                        event_id,
+                        session_id,
+                        mandate_id,
+                        quote_id,
+                        event_type,
+                        event_json,
+                        created_at
+                    )
+                    SELECT
+                        sequence_number,
+                        event_id,
+                        session_id,
+                        NULL,
+                        quote_id,
+                        event_type,
+                        event_json,
+                        created_at
+                    FROM audit_events_legacy
+                    """
+                )
+                connection.execute(
+                    "DROP TABLE audit_events_legacy"
+                )
+
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS audit_events (
                 sequence_number INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_id TEXT NOT NULL UNIQUE,
-                session_id TEXT NOT NULL,
+                session_id TEXT,
+                mandate_id TEXT,
                 quote_id TEXT,
                 event_type TEXT NOT NULL,
                 event_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                CHECK (
+                    session_id IS NOT NULL
+                    OR mandate_id IS NOT NULL
+                )
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+                idx_audit_events_mandate_sequence
+            ON audit_events (
+                mandate_id,
+                sequence_number
             )
             """
         )
@@ -271,16 +376,18 @@ def save_audit_event_idempotently(
             INSERT OR IGNORE INTO audit_events (
                 event_id,
                 session_id,
+                mandate_id,
                 quote_id,
                 event_type,
                 event_json,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event.event_id,
                 event.session_id,
+                event.mandate_id,
                 event.quote_id,
                 event.event_type,
                 event.model_dump_json(),
@@ -316,7 +423,8 @@ def _audit_event_terms(
 
 def record_audit_event(
     *,
-    session_id: str,
+    session_id: str | None = None,
+    mandate_id: str | None = None,
     event_type: AuditEventType,
     subject: str,
     actor: AuditActor,
@@ -334,10 +442,12 @@ def record_audit_event(
     event = new_audit_event(
         event_id=deterministic_audit_event_id(
             session_id=session_id,
+            mandate_id=mandate_id,
             event_type=event_type,
             subject=subject,
         ),
         session_id=session_id,
+        mandate_id=mandate_id,
         quote_id=quote_id,
         event_type=event_type,
         actor=actor,
@@ -376,6 +486,32 @@ def list_audit_events(
             ORDER BY sequence_number
             """,
             (cleaned_session_id,),
+        ).fetchall()
+
+    return [
+        AuditEvent.model_validate_json(row[0])
+        for row in rows
+    ]
+
+
+def list_mandate_audit_events(
+    mandate_id: str,
+) -> list[AuditEvent]:
+    cleaned_mandate_id = mandate_id.strip()
+    if not cleaned_mandate_id:
+        raise ValueError("Purchase mandate ID is required.")
+
+    initialize_audit_event_store()
+
+    with database_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT event_json
+            FROM audit_events
+            WHERE mandate_id = ?
+            ORDER BY sequence_number
+            """,
+            (cleaned_mandate_id,),
         ).fetchall()
 
     return [

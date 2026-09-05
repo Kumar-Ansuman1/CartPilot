@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from backend.app.audit_events import list_session_audit_events
+from backend.app.audit_events import list_audit_events
 from backend.app.delegated_buyer import (
     DelegatedBuyerPlan,
     run_delegated_purchase,
@@ -69,7 +69,7 @@ def test_ai_plan_is_revalidated_and_quote_is_mandate_bound(monkeypatch) -> None:
     assert execution.quote_id == result.quote.quote_id
     assert execution.committed_paise == result.quote.total_paise
 
-    audit_events = list_session_audit_events(result.session_id)
+    audit_events = list_audit_events(result.session_id)
     cross_sell_events = [
         event for event in audit_events
         if event.event_type == "cross_sell_decided"
@@ -137,7 +137,7 @@ def test_ai_can_select_eligible_cross_sell_and_quote_includes_it(monkeypatch) ->
     assert execution.status == "quote_ready"
     assert execution.committed_paise == 99_800
 
-    audit_events = list_session_audit_events(result.session_id)
+    audit_events = list_audit_events(result.session_id)
     cross_sell_events = [
         event for event in audit_events
         if event.event_type == "cross_sell_decided"

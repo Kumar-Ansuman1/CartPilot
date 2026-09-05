@@ -1,20 +1,23 @@
-from unittest.mock import patch
-import pytest
-
-from fastapi.testclient import TestClient
-
-from backend.app.commerce_agent import CommerceAgentResult
-from backend.app.main import app
-from backend.app.models import ExtractedShoppingIntent
 from datetime import datetime, timezone
+from unittest.mock import patch
+
+import pytest
+from fastapi.testclient import TestClient
 
 from backend.app.checkout_service import (
     CheckoutOrder,
     QuoteExpiredError,
     QuoteNotFoundError,
+    QuoteNotLinkedError,
     RazorpayOrderError,
 )
-
+from backend.app.commerce_agent import (
+    CommerceAgentResult,
+)
+from backend.app.main import app
+from backend.app.models import (
+    ExtractedShoppingIntent,
+)
 from backend.app.payment_service import (
     InvalidPaymentSignatureError,
     PaymentQuoteNotFoundError,
@@ -22,14 +25,24 @@ from backend.app.payment_service import (
 )
 from backend.app.quote_store import StoredPayment
 
+
 client = TestClient(app)
+
+TEST_QUOTE_ID = (
+    "quote_123e4567e89b12d3a456426614174000"
+)
+TEST_ORDER_ID = "order_test123"
+TEST_PAYMENT_ID = "pay_test123"
+TEST_SIGNATURE = "a" * 64
 
 
 def test_health_endpoint():
     response = client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json() == {
+        "status": "ok"
+    }
 
 
 def test_shop_endpoint_returns_clarification():
@@ -39,16 +52,26 @@ def test_shop_endpoint_returns_clarification():
         requested_categories=["cases"],
         compatibility_tags=[],
         needs_clarification=True,
-        clarification_question="What is your phone model and budget?",
+        clarification_question=(
+            "What is your phone model and budget?"
+        ),
     )
 
     result = CommerceAgentResult(
         status="clarification_required",
-        message="What is your phone model and budget?",
+        message=(
+            "What is your phone model and budget?"
+        ),
         intent=intent,
         decision_trace=[
-            "The request was stopped before catalog search.",
-            "No quote or payment action was created.",
+            (
+                "The request was stopped before "
+                "catalog search."
+            ),
+            (
+                "No quote or payment action "
+                "was created."
+            ),
         ],
     )
 
@@ -58,18 +81,39 @@ def test_shop_endpoint_returns_clarification():
     ):
         response = client.post(
             "/api/shop",
-            json={"message": "I need a phone case"},
+            json={
+                "message": "I need a phone case"
+            },
         )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "clarification_required"
-    assert response.json()["quote"] is None
+
+    response_data = response.json()
+
+    assert (
+        response_data["status"]
+        == "clarification_required"
+    )
+    assert response_data["session_id"] is None
+    assert (
+        response_data["base_product_options"]
+        == []
+    )
+    assert (
+        response_data[
+            "recommended_base_product_sku"
+        ]
+        is None
+    )
+    assert "quote" not in response_data
 
 
 def test_shop_endpoint_rejects_short_message():
     response = client.post(
         "/api/shop",
-        json={"message": "hi"},
+        json={
+            "message": "hi"
+        },
     )
 
     assert response.status_code == 422
@@ -78,23 +122,30 @@ def test_shop_endpoint_rejects_short_message():
 def test_shop_endpoint_handles_ai_failure_safely():
     with patch(
         "backend.app.main.run_commerce_agent",
-        side_effect=RuntimeError("Provider failure details"),
+        side_effect=RuntimeError(
+            "Provider failure details"
+        ),
     ):
         response = client.post(
             "/api/shop",
-            json={"message": "Find me a USB-C charger"},
+            json={
+                "message": (
+                    "Find me a USB-C charger"
+                )
+            },
         )
 
     assert response.status_code == 503
     assert response.json() == {
-        "detail": "The AI intent service is temporarily unavailable."
+        "detail": (
+            "The AI intent service is "
+            "temporarily unavailable."
+        )
     }
-    assert "Provider failure details" not in response.text
-
-TEST_QUOTE_ID = "quote_123e4567e89b12d3a456426614174000"
-TEST_ORDER_ID = "order_test123"
-TEST_PAYMENT_ID = "pay_test123"
-TEST_SIGNATURE = "a" * 64
+    assert (
+        "Provider failure details"
+        not in response.text
+    )
 
 
 def test_checkout_requires_explicit_confirmation():
@@ -116,9 +167,9 @@ def test_checkout_requires_explicit_confirmation():
 def test_checkout_confirmation_returns_order():
     checkout_order = CheckoutOrder(
         quote_id=TEST_QUOTE_ID,
-        razorpay_order_id="order_test123",
+        razorpay_order_id=TEST_ORDER_ID,
         razorpay_key_id="rzp_test_example",
-        amount_paise=199900,
+        amount_paise=199_900,
         currency="INR",
         status="created",
     )
@@ -136,8 +187,14 @@ def test_checkout_confirmation_returns_order():
         )
 
     assert response.status_code == 200
-    assert response.json()["razorpay_order_id"] == "order_test123"
-    assert response.json()["amount_paise"] == 199900
+    assert (
+        response.json()["razorpay_order_id"]
+        == TEST_ORDER_ID
+    )
+    assert (
+        response.json()["amount_paise"]
+        == 199_900
+    )
 
     mock_create_order.assert_called_once_with(
         quote_id=TEST_QUOTE_ID,
@@ -145,24 +202,51 @@ def test_checkout_confirmation_returns_order():
 
 
 @pytest.mark.parametrize(
-    ("error", "expected_status", "expected_detail"),
-   [
     (
-        QuoteNotFoundError("internal quote lookup failure"),
-        404,
-        "The quote was not found.",
+        "error",
+        "expected_status",
+        "expected_detail",
     ),
-    (
-        QuoteExpiredError("internal expiration timestamp failure"),
-        410,
-        "The quote has expired. Please request a new quote.",
-    ),
-    (
-        RazorpayOrderError("internal provider authentication failure"),
-        502,
-        "The payment provider could not create the order.",
-    ),
-]
+    [
+        (
+            QuoteNotFoundError(
+                "internal quote lookup failure"
+            ),
+            404,
+            "The quote was not found.",
+        ),
+        (
+            QuoteNotLinkedError(
+                "internal session-link failure"
+            ),
+            409,
+            (
+                "The quote is not linked to a "
+                "completed shopping session."
+            ),
+        ),
+        (
+            QuoteExpiredError(
+                "internal expiration timestamp failure"
+            ),
+            410,
+            (
+                "The quote has expired. "
+                "Please request a new quote."
+            ),
+        ),
+        (
+            RazorpayOrderError(
+                "internal provider authentication "
+                "failure"
+            ),
+            502,
+            (
+                "The payment provider could not "
+                "create the order."
+            ),
+        ),
+    ],
 )
 def test_checkout_confirmation_maps_failures_safely(
     error,
@@ -181,11 +265,15 @@ def test_checkout_confirmation_maps_failures_safely(
             },
         )
 
-    assert response.status_code == expected_status
+    assert (
+        response.status_code
+        == expected_status
+    )
     assert response.json() == {
         "detail": expected_detail,
     }
     assert str(error) not in response.text
+
 
 def test_payment_verification_returns_verified_payment():
     verified_payment = StoredPayment(
@@ -193,7 +281,9 @@ def test_payment_verification_returns_verified_payment():
         razorpay_order_id=TEST_ORDER_ID,
         razorpay_payment_id=TEST_PAYMENT_ID,
         status="verified",
-        verified_at=datetime.now(timezone.utc),
+        verified_at=datetime.now(
+            timezone.utc
+        ),
     )
 
     with patch(
@@ -204,14 +294,23 @@ def test_payment_verification_returns_verified_payment():
             "/api/payment/verify",
             json={
                 "quote_id": TEST_QUOTE_ID,
-                "razorpay_order_id": TEST_ORDER_ID,
-                "razorpay_payment_id": TEST_PAYMENT_ID,
-                "razorpay_signature": TEST_SIGNATURE,
+                "razorpay_order_id": (
+                    TEST_ORDER_ID
+                ),
+                "razorpay_payment_id": (
+                    TEST_PAYMENT_ID
+                ),
+                "razorpay_signature": (
+                    TEST_SIGNATURE
+                ),
             },
         )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "verified"
+    assert (
+        response.json()["status"]
+        == "verified"
+    )
     assert (
         response.json()["razorpay_payment_id"]
         == TEST_PAYMENT_ID
@@ -233,8 +332,12 @@ def test_payment_verification_rejects_malformed_signature():
             "/api/payment/verify",
             json={
                 "quote_id": TEST_QUOTE_ID,
-                "razorpay_order_id": TEST_ORDER_ID,
-                "razorpay_payment_id": TEST_PAYMENT_ID,
+                "razorpay_order_id": (
+                    TEST_ORDER_ID
+                ),
+                "razorpay_payment_id": (
+                    TEST_PAYMENT_ID
+                ),
                 "razorpay_signature": "invalid",
             },
         )
@@ -244,7 +347,11 @@ def test_payment_verification_rejects_malformed_signature():
 
 
 @pytest.mark.parametrize(
-    ("error", "expected_status", "expected_detail"),
+    (
+        "error",
+        "expected_status",
+        "expected_detail",
+    ),
     [
         (
             PaymentQuoteNotFoundError(
@@ -258,14 +365,20 @@ def test_payment_verification_rejects_malformed_signature():
                 "internal stored order mismatch"
             ),
             409,
-            "The payment does not match the stored order.",
+            (
+                "The payment does not match "
+                "the stored order."
+            ),
         ),
         (
             InvalidPaymentSignatureError(
                 "internal HMAC comparison failure"
             ),
             400,
-            "Payment signature verification failed.",
+            (
+                "Payment signature verification "
+                "failed."
+            ),
         ),
     ],
 )
@@ -282,13 +395,22 @@ def test_payment_verification_maps_failures_safely(
             "/api/payment/verify",
             json={
                 "quote_id": TEST_QUOTE_ID,
-                "razorpay_order_id": TEST_ORDER_ID,
-                "razorpay_payment_id": TEST_PAYMENT_ID,
-                "razorpay_signature": TEST_SIGNATURE,
+                "razorpay_order_id": (
+                    TEST_ORDER_ID
+                ),
+                "razorpay_payment_id": (
+                    TEST_PAYMENT_ID
+                ),
+                "razorpay_signature": (
+                    TEST_SIGNATURE
+                ),
             },
         )
 
-    assert response.status_code == expected_status
+    assert (
+        response.status_code
+        == expected_status
+    )
     assert response.json() == {
         "detail": expected_detail,
     }

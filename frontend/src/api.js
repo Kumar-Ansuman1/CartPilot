@@ -1,29 +1,37 @@
-const API_BASE_URL =
+const API_BASE_URL = (
   import.meta.env.VITE_API_BASE_URL ??
-  "http://127.0.0.1:8000";
+  "http://127.0.0.1:8000"
+).replace(/\/+$/, "");
 
 
 async function apiRequest(path, options = {}) {
   let response;
 
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, {
-      headers: {
-        "Content-Type": "application/json",
-        ...options.headers,
-      },
-      ...options,
-    });
+    response = await fetch(
+      `${API_BASE_URL}${path}`,
+      {
+        ...options,
+        headers: {
+          "Content-Type": "application/json",
+          ...(options.headers ?? {}),
+        },
+      }
+    );
   } catch {
     throw new Error(
-      "Could not reach the CartPilot API. Is the backend running?"
+      "Could not reach the CartPilot API. " +
+        "Is the backend running?"
     );
   }
 
-  const data = await response.json().catch(() => null);
+  const data = await response
+    .json()
+    .catch(() => null);
 
   if (!response.ok) {
-    let message = "The request could not be completed.";
+    let message =
+      "The request could not be completed.";
 
     if (typeof data?.detail === "string") {
       message = data.detail;
@@ -40,22 +48,82 @@ async function apiRequest(path, options = {}) {
 }
 
 
-export function requestShoppingQuote(message) {
+export function startShoppingSession(message) {
   return apiRequest("/api/shop", {
     method: "POST",
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({
+      message,
+    }),
   });
 }
 
 
-export function confirmCheckout(quoteId) {
-  return apiRequest("/api/checkout/confirm", {
+export function selectBaseProduct(
+  sessionId,
+  baseProductSku
+) {
+  return apiRequest("/api/shop/select-base", {
     method: "POST",
     body: JSON.stringify({
-      quote_id: quoteId,
-      confirmed: true,
+      session_id: sessionId,
+      base_product_sku: baseProductSku,
     }),
   });
+}
+
+
+function submitCrossSellDecision(
+  sessionId,
+  decision,
+  crossSellProductSku
+) {
+  return apiRequest(
+    "/api/shop/select-cross-sell",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        session_id: sessionId,
+        decision,
+        cross_sell_product_sku:
+          crossSellProductSku,
+      }),
+    }
+  );
+}
+
+
+export function acceptCrossSell(
+  sessionId,
+  crossSellProductSku
+) {
+  return submitCrossSellDecision(
+    sessionId,
+    "accept",
+    crossSellProductSku
+  );
+}
+
+
+export function declineCrossSell(sessionId) {
+  return submitCrossSellDecision(
+    sessionId,
+    "decline",
+    null
+  );
+}
+
+
+export function confirmCheckout(quoteId) {
+  return apiRequest(
+    "/api/checkout/confirm",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        quote_id: quoteId,
+        confirmed: true,
+      }),
+    }
+  );
 }
 
 
@@ -63,16 +131,19 @@ export function verifyPayment(
   quoteId,
   razorpayResponse
 ) {
-  return apiRequest("/api/payment/verify", {
-    method: "POST",
-    body: JSON.stringify({
-      quote_id: quoteId,
-      razorpay_order_id:
-        razorpayResponse.razorpay_order_id,
-      razorpay_payment_id:
-        razorpayResponse.razorpay_payment_id,
-      razorpay_signature:
-        razorpayResponse.razorpay_signature,
-    }),
-  });
+  return apiRequest(
+    "/api/payment/verify",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        quote_id: quoteId,
+        razorpay_order_id:
+          razorpayResponse.razorpay_order_id,
+        razorpay_payment_id:
+          razorpayResponse.razorpay_payment_id,
+        razorpay_signature:
+          razorpayResponse.razorpay_signature,
+      }),
+    }
+  );
 }

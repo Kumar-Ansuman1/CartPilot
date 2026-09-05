@@ -1,6 +1,4 @@
-import os
-import sqlite3
-from pathlib import Path
+from backend.app.database import database_connection
 from typing import Literal
 from datetime import datetime, timezone
 
@@ -8,12 +6,7 @@ from pydantic import BaseModel, ConfigDict
 
 from backend.app.models import Quote
 
-
-DEFAULT_DATABASE_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "data"
-    / "cartpilot.db"
-)
+from sqlite3 import IntegrityError
 
 
 class StoredQuote(BaseModel):
@@ -36,27 +29,34 @@ class StoredPayment(BaseModel):
     status: Literal["verified"]
     verified_at: datetime
 
-
-def _get_database_path() -> Path:
-    configured_path = os.getenv("CARTPILOT_DB_PATH")
-
-    if configured_path:
-        return Path(configured_path)
-
-    return DEFAULT_DATABASE_PATH
+class QuoteConflictError(Exception):
+    pass
 
 
-def _connect() -> sqlite3.Connection:
-    database_path = _get_database_path()
-    database_path.parent.mkdir(parents=True, exist_ok=True)
+def _quote_terms(
+    quote: Quote,
+) -> tuple[
+    str,
+    str,
+    str,
+    int,
+    str | None,
+    int,
+    int,
+]:
+    return (
+        quote.catalog_version,
+        quote.currency,
+        quote.base_product_sku,
+        quote.base_price_paise,
+        quote.upsell_product_sku,
+        quote.upsell_price_paise,
+        quote.total_paise,
+    )
 
-    connection = sqlite3.connect(database_path)
-    connection.execute("PRAGMA foreign_keys = ON")
-
-    return connection
 
 def initialize_quote_store() -> None:
-    with _connect() as connection:
+    with database_connection() as connection:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS quotes (
@@ -96,7 +96,7 @@ def initialize_quote_store() -> None:
 def save_quote(quote: Quote) -> StoredQuote:
     initialize_quote_store()
 
-    with _connect() as connection:
+    with database_connection() as connection:
         connection.execute(
             """
             INSERT INTO quotes (
@@ -129,7 +129,7 @@ def get_stored_quote(
 ) -> StoredQuote | None:
     initialize_quote_store()
 
-    with _connect() as connection:
+    with database_connection() as connection:
         row = connection.execute(
             """
             SELECT quote_json, status, razorpay_order_id
@@ -150,12 +150,36 @@ def get_stored_quote(
         razorpay_order_id=razorpay_order_id,
     )
 
+def save_quote_idempotently(
+    quote: Quote,
+) -> StoredQuote:
+    try:
+        return save_quote(quote)
+    except IntegrityError as exc:
+        stored_quote = get_stored_quote(
+            quote.quote_id
+        )
+
+        if stored_quote is None:
+            raise
+
+        if (
+            _quote_terms(stored_quote.quote)
+            != _quote_terms(quote)
+        ):
+            raise QuoteConflictError(
+                "A different quote already exists "
+                "for this shopping session."
+            ) from exc
+
+        return stored_quote
+
 def mark_quote_expired(
     quote_id: str,
 ) -> StoredQuote:
     initialize_quote_store()
 
-    with _connect() as connection:
+    with database_connection() as connection:
         cursor = connection.execute(
             """
             UPDATE quotes
@@ -185,7 +209,7 @@ def mark_order_created(
 ) -> StoredQuote:
     initialize_quote_store()
 
-    with _connect() as connection:
+    with database_connection() as connection:
         cursor = connection.execute(
             """
             UPDATE quotes
@@ -225,7 +249,7 @@ def get_verified_payment(
 ) -> StoredPayment | None:
     initialize_quote_store()
 
-    with _connect() as connection:
+    with database_connection() as connection:
         row = connection.execute(
             """
             SELECT
@@ -275,7 +299,7 @@ def save_verified_payment(
 
     verified_at = datetime.now(timezone.utc)
 
-    with _connect() as connection:
+    with database_connection() as connection:
         connection.execute(
             """
             INSERT OR IGNORE INTO payments (

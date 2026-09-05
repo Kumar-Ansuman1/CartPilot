@@ -227,3 +227,179 @@ class ExtractedShoppingIntent(BaseModel):
             )
 
         return self
+
+class ShoppingSession(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+    )
+
+    session_id: str = Field(
+        pattern=r"^session_[0-9a-f]{32}$"
+    )
+    catalog_version: str = Field(min_length=1)
+    request: ShoppingRequest
+
+    base_product_skus: list[str] = Field(
+        min_length=1,
+        max_length=3,
+    )
+    selected_base_product_sku: str | None = None
+
+    cross_sell_option_skus: list[str] = Field(
+        default_factory=list,
+        max_length=2,
+    )
+
+    status: Literal[
+        "awaiting_base_selection",
+        "awaiting_cross_sell_decision",
+        "quote_created",
+        "expired",
+    ]
+
+    quote_id: str | None = Field(
+        default=None,
+        pattern=r"^quote_[0-9a-f]{32}$",
+    )
+
+    created_at: datetime
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def validate_session(self) -> "ShoppingSession":
+        if len(set(self.base_product_skus)) != len(
+            self.base_product_skus
+        ):
+            raise ValueError(
+                "Base-product options must not contain duplicates."
+            )
+
+        if len(set(self.cross_sell_option_skus)) != len(
+            self.cross_sell_option_skus
+        ):
+            raise ValueError(
+                "Cross-sell options must not contain duplicates."
+            )
+
+        if (
+            self.selected_base_product_sku is not None
+            and self.selected_base_product_sku
+            not in self.base_product_skus
+        ):
+            raise ValueError(
+                "Selected base product must be one of the "
+                "offered base products."
+            )
+
+        if (
+            self.cross_sell_option_skus
+            and self.selected_base_product_sku is None
+        ):
+            raise ValueError(
+                "Cross-sell options require a selected base product."
+            )
+
+        if (
+            self.selected_base_product_sku
+            in self.cross_sell_option_skus
+        ):
+            raise ValueError(
+                "The base product cannot be its own cross-sell."
+            )
+
+        if self.status == "awaiting_base_selection":
+            if (
+                self.selected_base_product_sku is not None
+                or self.cross_sell_option_skus
+                or self.quote_id is not None
+            ):
+                raise ValueError(
+                    "A session awaiting base selection cannot "
+                    "contain a selection, cross-sells or quote."
+                )
+
+        if self.status == "awaiting_cross_sell_decision":
+            if self.selected_base_product_sku is None:
+                raise ValueError(
+                    "Cross-sell selection requires a base product."
+                )
+
+            if self.quote_id is not None:
+                raise ValueError(
+                    "A quote cannot exist before the cross-sell "
+                    "decision is completed."
+                )
+
+        if self.status == "quote_created":
+            if self.selected_base_product_sku is None:
+                raise ValueError(
+                    "A quoted session requires a base product."
+                )
+
+            if self.quote_id is None:
+                raise ValueError(
+                    "A quoted session requires a quote ID."
+                )
+
+        if self.status == "expired" and self.quote_id is not None:
+            raise ValueError(
+                "A session with a completed quote cannot be expired."
+            )
+
+        if (
+            self.created_at.tzinfo is None
+            or self.expires_at.tzinfo is None
+        ):
+            raise ValueError(
+                "Session timestamps must include timezone information."
+            )
+
+        if self.expires_at <= self.created_at:
+            raise ValueError(
+                "Session expiry must be after its creation time."
+            )
+
+        return self
+
+class ProductOption(BaseModel):
+    """
+    Safe product information that may be returned to the frontend.
+
+    Internal inventory counts and merchant cross-sell mappings are
+    intentionally excluded.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+    )
+
+    sku: str = Field(min_length=3)
+    name: str = Field(min_length=2)
+    description: str = Field(min_length=5)
+    category: str = Field(min_length=2)
+    price_paise: int = Field(gt=0)
+    currency: Literal["INR"] = "INR"
+    tags: list[str] = Field(default_factory=list)
+    compatibility_tags: list[str] = Field(
+        default_factory=list
+    )
+
+    @classmethod
+    def from_product(
+        cls,
+        product: Product,
+    ) -> "ProductOption":
+        return cls(
+            sku=product.sku,
+            name=product.name,
+            description=product.description,
+            category=product.category,
+            price_paise=product.price_paise,
+            currency="INR",
+            tags=list(product.tags),
+            compatibility_tags=list(
+                product.compatibility_tags
+            ),
+        )

@@ -1,8 +1,34 @@
 from datetime import datetime, timedelta, timezone
+from re import fullmatch
 from uuid import uuid4
 
 from backend.app.catalog import Catalog
-from backend.app.models import Product, Quote, ShoppingRequest
+from backend.app.models import (
+    Product,
+    Quote,
+    ShoppingRequest,
+)
+
+
+def _create_quote_id(
+    session_id: str | None,
+) -> str:
+    if session_id is None:
+        return f"quote_{uuid4().hex}"
+
+    cleaned_session_id = session_id.strip()
+
+    match = fullmatch(
+        r"session_([0-9a-f]{32})",
+        cleaned_session_id,
+    )
+
+    if match is None:
+        raise ValueError(
+            "A valid shopping-session ID is required."
+        )
+
+    return f"quote_{match.group(1)}"
 
 
 def _get_available_product(
@@ -27,9 +53,12 @@ def _get_available_product(
 def _validate_product_permissions(
     product: Product,
     request: ShoppingRequest,
+    *,
+    enforce_requested_category: bool,
 ) -> None:
     if (
-        request.allowed_categories
+        enforce_requested_category
+        and request.allowed_categories
         and product.category.lower()
         not in set(request.allowed_categories)
     ):
@@ -42,7 +71,8 @@ def _validate_product_permissions(
         return
 
     product_compatibility = {
-        tag.lower() for tag in product.compatibility_tags
+        tag.lower()
+        for tag in product.compatibility_tags
     }
     required_compatibility = set(
         request.compatibility_tags
@@ -68,6 +98,8 @@ def create_quote(
     base_product_sku: str,
     upsell_product_sku: str | None = None,
     validity_minutes: int = 5,
+    *,
+    session_id: str | None = None,
 ) -> Quote:
     if not 1 <= validity_minutes <= 15:
         raise ValueError(
@@ -78,7 +110,12 @@ def create_quote(
         catalog,
         base_product_sku,
     )
-    _validate_product_permissions(base_product, request)
+
+    _validate_product_permissions(
+        base_product,
+        request,
+        enforce_requested_category=True,
+    )
 
     if base_product.price_paise > request.budget_paise:
         raise ValueError(
@@ -103,19 +140,27 @@ def create_quote(
                 "The base product cannot also be the cross-sell."
             )
 
-        if upsell_product_sku not in base_product.cross_sell_skus:
+        if (
+            upsell_product_sku
+            not in base_product.cross_sell_skus
+        ):
             raise ValueError(
                 f"Product '{upsell_product_sku}' is not an "
-                f"approved cross-sell for '{base_product.sku}'."
+                f"approved cross-sell for "
+                f"'{base_product.sku}'."
             )
 
         upsell_product = _get_available_product(
             catalog,
             upsell_product_sku,
         )
+
+        # Cross-sells may belong to another category, but
+        # compatibility requirements still apply.
         _validate_product_permissions(
             upsell_product,
             request,
+            enforce_requested_category=False,
         )
 
         upsell_limit = (
@@ -149,7 +194,7 @@ def create_quote(
     created_at = datetime.now(timezone.utc)
 
     return Quote(
-        quote_id=f"quote_{uuid4().hex}",
+        quote_id=_create_quote_id(session_id),
         catalog_version=catalog.catalog_version,
         currency=catalog.currency,
         base_product_sku=base_product.sku,
@@ -162,7 +207,6 @@ def create_quote(
         upsell_price_paise=upsell_price_paise,
         total_paise=total_paise,
         created_at=created_at,
-        expires_at=created_at + timedelta(
-            minutes=validity_minutes
-        ),
+        expires_at=created_at
+        + timedelta(minutes=validity_minutes),
     )

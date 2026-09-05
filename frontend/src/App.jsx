@@ -1,4 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   Bot,
   CheckCircle2,
@@ -13,17 +17,22 @@ import {
 } from "lucide-react";
 
 import {
+  acceptCrossSell,
   confirmCheckout,
-  requestShoppingQuote,
+  declineCrossSell,
+  selectBaseProduct,
+  startShoppingSession,
   verifyPayment,
 } from "./api";
-import { openRazorpayCheckout } from "./razorpay";
+import {
+  openRazorpayCheckout,
+} from "./razorpay";
 import "./App.css";
 
 
 const EXAMPLE_REQUESTS = [
   "USB-C charger for Android under 2000 rupees",
-  "iPhone 15 cable under 1500 rupees",
+  "iPhone 15 case under 1500 rupees",
   "Bluetooth earbuds under 3000 rupees",
 ];
 
@@ -36,13 +45,342 @@ function formatMoney(amountPaise) {
 }
 
 
-function QuoteCard({
+function formatTime(timestamp) {
+  return new Date(timestamp).toLocaleTimeString(
+    [],
+    {
+      hour: "2-digit",
+      minute: "2-digit",
+    }
+  );
+}
+
+
+function createMessageId(label) {
+  return (
+    `${Date.now()}-${label}-` +
+    Math.random().toString(16).slice(2)
+  );
+}
+
+
+function DecisionDetails({ steps }) {
+  if (!steps?.length) {
+    return null;
+  }
+
+  return (
+    <details className="decision-details">
+      <summary>
+        <ShieldCheck size={16} />
+        Why this action is safe
+      </summary>
+
+      <ul>
+        {steps.map((step) => (
+          <li key={step}>{step}</li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+
+function BaseSelectionCard({
   result,
+  isActive,
+  selectionStatus,
+  pendingSku,
+  onSelect,
+}) {
+  return (
+    <article className="selection-card">
+      <div className="selection-heading">
+        <div>
+          <span className="eyebrow">
+            Choose your product
+          </span>
+
+          <h3>Top catalog matches</h3>
+
+          <p>
+            No product has been selected for you.
+            Review the options and choose one.
+          </p>
+        </div>
+
+        <span className="option-count">
+          {result.base_product_options.length}
+          {" "}
+          options
+        </span>
+      </div>
+
+      <div className="product-options">
+        {result.base_product_options.map(
+          (product) => {
+            const isRecommended =
+              product.sku ===
+              result.recommended_base_product_sku;
+
+            const isPending =
+              selectionStatus ===
+                "selecting_base" &&
+              pendingSku === product.sku;
+
+            return (
+              <div
+                className="product-option"
+                key={product.sku}
+              >
+                <div className="product-option-heading">
+                  <div>
+                    {isRecommended && (
+                      <span className="recommended-badge">
+                        Best match
+                      </span>
+                    )}
+
+                    <h4>{product.name}</h4>
+                  </div>
+
+                  <strong>
+                    {formatMoney(
+                      product.price_paise
+                    )}
+                  </strong>
+                </div>
+
+                <p>{product.description}</p>
+
+                <div className="product-meta">
+                  <span>{product.category}</span>
+                  <span>{product.sku}</span>
+                  <span>In stock</span>
+                </div>
+
+                <button
+                  className="selection-button"
+                  type="button"
+                  disabled={
+                    !isActive ||
+                    selectionStatus !== "idle"
+                  }
+                  onClick={() =>
+                    onSelect(product)
+                  }
+                >
+                  <PackageCheck size={17} />
+
+                  {isPending
+                    ? "Selecting…"
+                    : "Choose this product"}
+                </button>
+              </div>
+            );
+          }
+        )}
+      </div>
+
+      <div className="session-expiry">
+        <Clock3 size={14} />
+
+        Choose before{" "}
+        {formatTime(
+          result.session_expires_at
+        )}
+      </div>
+
+      <DecisionDetails
+        steps={result.decision_trace}
+      />
+    </article>
+  );
+}
+
+
+function CrossSellDecisionCard({
+  result,
+  isActive,
+  selectionStatus,
+  pendingSku,
+  onAccept,
+  onDecline,
+}) {
+  const hasOptions =
+    result.cross_sell_options.length > 0;
+
+  return (
+    <article className="selection-card">
+      <div className="selected-base-summary">
+        <div>
+          <span className="eyebrow">
+            Selected product
+          </span>
+
+          <h3>
+            {result.selected_base_product.name}
+          </h3>
+
+          <p>
+            {
+              result.selected_base_product
+                .description
+            }
+          </p>
+        </div>
+
+        <strong>
+          {formatMoney(
+            result.selected_base_product
+              .price_paise
+          )}
+        </strong>
+      </div>
+
+      <div className="cross-sell-heading">
+        <div>
+          <span className="eyebrow">
+            Optional add-on
+          </span>
+
+          <h4>
+            {hasOptions
+              ? "Would you like to add one?"
+              : "No eligible add-on found"}
+          </h4>
+
+          <p>
+            {hasOptions
+              ? (
+                "Nothing is preselected. " +
+                "You may add one offered item " +
+                "or continue without it."
+              )
+              : (
+                "You can continue with only " +
+                "your selected product."
+              )}
+          </p>
+        </div>
+      </div>
+
+      {hasOptions && (
+        <div className="product-options">
+          {result.cross_sell_options.map(
+            (product) => {
+              const isPending =
+                selectionStatus ===
+                  "finalizing_cross_sell" &&
+                pendingSku === product.sku;
+
+              return (
+                <div
+                  className="product-option compact"
+                  key={product.sku}
+                >
+                  <div className="product-option-heading">
+                    <div>
+                      <h4>{product.name}</h4>
+
+                      <span className="cross-category-label">
+                        Optional companion
+                      </span>
+                    </div>
+
+                    <strong>
+                      +
+                      {formatMoney(
+                        product.price_paise
+                      )}
+                    </strong>
+                  </div>
+
+                  <p>{product.description}</p>
+
+                  <div className="product-meta">
+                    <span>
+                      {product.category}
+                    </span>
+                    <span>{product.sku}</span>
+                    <span>In stock</span>
+                  </div>
+
+                  <button
+                    className="selection-button"
+                    type="button"
+                    disabled={
+                      !isActive ||
+                      selectionStatus !== "idle"
+                    }
+                    onClick={() =>
+                      onAccept(product)
+                    }
+                  >
+                    <PackageCheck size={17} />
+
+                    {isPending
+                      ? "Creating quote…"
+                      : "Add this item"}
+                  </button>
+                </div>
+              );
+            }
+          )}
+        </div>
+      )}
+
+      <button
+        className="decline-button"
+        type="button"
+        disabled={
+          !isActive ||
+          selectionStatus !== "idle"
+        }
+        onClick={onDecline}
+      >
+        {selectionStatus ===
+          "finalizing_cross_sell" &&
+        pendingSku === null
+          ? "Creating quote…"
+          : "Continue without an add-on"}
+      </button>
+
+      <p className="confirmation-note">
+        A quote is created only after you accept
+        an offered add-on or explicitly decline.
+      </p>
+
+      <div className="session-expiry">
+        <Clock3 size={14} />
+
+        Decide before{" "}
+        {formatTime(
+          result.session_expires_at
+        )}
+      </div>
+
+      <DecisionDetails
+        steps={result.decision_trace}
+      />
+    </article>
+  );
+}
+
+
+function QuoteCard({
+  quoteView,
   isActive,
   paymentStatus,
   onCheckout,
 }) {
-  const { base_product, upsell_product, quote } = result;
+  const {
+    result,
+    baseProduct,
+    crossSellProduct,
+  } = quoteView;
+
+  const { quote } = result;
 
   const buttonLabels = {
     idle: "Confirm & Pay",
@@ -62,39 +400,59 @@ function QuoteCard({
       <div className="quote-heading">
         <div>
           <span className="eyebrow">
-            Recommended match
+            Your selected product
           </span>
 
-          <h3>{base_product.name}</h3>
+          <h3>{baseProduct.name}</h3>
 
-          <p>{base_product.description}</p>
+          <p>{baseProduct.description}</p>
         </div>
 
         <span className="price">
-          {formatMoney(quote.base_price_paise)}
+          {formatMoney(
+            quote.base_price_paise
+          )}
         </span>
       </div>
 
       <div className="product-meta">
-        <span>{base_product.category}</span>
-        <span>{base_product.sku}</span>
+        <span>{baseProduct.category}</span>
+        <span>{baseProduct.sku}</span>
         <span>In stock</span>
       </div>
 
-      {upsell_product && (
+      {crossSellProduct && (
         <div className="upsell">
           <div>
             <span className="eyebrow">
-              Optional add-on
+              Accepted add-on
             </span>
 
-            <strong>{upsell_product.name}</strong>
+            <strong>
+              {crossSellProduct.name}
+            </strong>
 
-            <p>{upsell_product.description}</p>
+            <p>
+              {crossSellProduct.description}
+            </p>
           </div>
 
           <span>
-            +{formatMoney(quote.upsell_price_paise)}
+            +
+            {formatMoney(
+              quote.upsell_price_paise
+            )}
+          </span>
+        </div>
+      )}
+
+      {!crossSellProduct && (
+        <div className="declined-summary">
+          <CheckCircle2 size={17} />
+
+          <span>
+            You chose to continue without an
+            add-on.
           </span>
         </div>
       )}
@@ -105,33 +463,22 @@ function QuoteCard({
 
           <small>
             <Clock3 size={14} />
+
             Quote valid until{" "}
-            {new Date(
-              quote.expires_at
-            ).toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            })}
+            {formatTime(quote.expires_at)}
           </small>
         </div>
 
         <strong>
-          {formatMoney(quote.total_paise)}
+          {formatMoney(
+            quote.total_paise
+          )}
         </strong>
       </div>
 
-      <details className="decision-details">
-        <summary>
-          <ShieldCheck size={16} />
-          Why this action is safe
-        </summary>
-
-        <ul>
-          {result.decision_trace.map((step) => (
-            <li key={step}>{step}</li>
-          ))}
-        </ul>
-      </details>
+      <DecisionDetails
+        steps={result.decision_trace}
+      />
 
       <button
         className="checkout-button"
@@ -153,8 +500,8 @@ function QuoteCard({
       </button>
 
       <p className="confirmation-note">
-        Nothing is charged until you confirm and complete
-        Razorpay Checkout.
+        Nothing is charged until you explicitly
+        confirm and complete Razorpay Checkout.
       </p>
     </article>
   );
@@ -169,30 +516,52 @@ function App() {
       id: "welcome",
       role: "assistant",
       text:
-        "Tell me what accessory you need, your device, " +
-        "and your maximum budget.",
+        "Tell me what accessory you need, " +
+        "your device, and your maximum budget.",
     },
   ]);
 
-  const [clarificationContext, setClarificationContext] =
-    useState("");
+  const [
+    clarificationContext,
+    setClarificationContext,
+  ] = useState("");
 
-  const [activeResult, setActiveResult] =
+  const [
+    activeSession,
+    setActiveSession,
+  ] = useState(null);
+
+  const [
+    activeQuote,
+    setActiveQuote,
+  ] = useState(null);
+
+  const [isThinking, setIsThinking] =
+    useState(false);
+
+  const [
+    selectionStatus,
+    setSelectionStatus,
+  ] = useState("idle");
+
+  const [pendingSku, setPendingSku] =
     useState(null);
 
-  const [isThinking, setIsThinking] = useState(false);
-
-  const [paymentStatus, setPaymentStatus] =
-    useState("idle");
+  const [
+    paymentStatus,
+    setPaymentStatus,
+  ] = useState("idle");
 
   const [error, setError] = useState("");
 
   const messagesContainerRef = useRef(null);
   const requestInFlightRef = useRef(false);
+  const actionInFlightRef = useRef(false);
   const checkoutInFlightRef = useRef(false);
 
   useEffect(() => {
-    const container = messagesContainerRef.current;
+    const container =
+      messagesContainerRef.current;
 
     if (container) {
       container.scrollTo({
@@ -200,7 +569,12 @@ function App() {
         behavior: "smooth",
       });
     }
-  }, [messages, isThinking]);
+  }, [
+    messages,
+    isThinking,
+    selectionStatus,
+    paymentStatus,
+  ]);
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -210,21 +584,27 @@ function App() {
     if (
       submittedMessage.length < 3 ||
       isThinking ||
-      requestInFlightRef.current
+      requestInFlightRef.current ||
+      actionInFlightRef.current ||
+      checkoutInFlightRef.current
     ) {
       return;
     }
 
     requestInFlightRef.current = true;
 
-    const completeMessage = clarificationContext
-      ? `${clarificationContext}. Additional details: ${submittedMessage}`
-      : submittedMessage;
+    const completeMessage =
+      clarificationContext
+        ? (
+          `${clarificationContext}. ` +
+          `Additional details: ${submittedMessage}`
+        )
+        : submittedMessage;
 
     setMessages((current) => [
       ...current,
       {
-        id: `${Date.now()}-user`,
+        id: createMessageId("user"),
         role: "user",
         text: submittedMessage,
       },
@@ -234,22 +614,31 @@ function App() {
     setError("");
     setIsThinking(true);
     setPaymentStatus("idle");
+    setSelectionStatus("idle");
+    setPendingSku(null);
+    setActiveSession(null);
+    setActiveQuote(null);
 
     try {
-      const result = await requestShoppingQuote(
-        completeMessage
-      );
+      const result =
+        await startShoppingSession(
+          completeMessage
+        );
 
       if (
-        result.status === "clarification_required"
+        result.status ===
+        "clarification_required"
       ) {
-        setClarificationContext(completeMessage);
-        setActiveResult(null);
+        setClarificationContext(
+          completeMessage
+        );
 
         setMessages((current) => [
           ...current,
           {
-            id: `${Date.now()}-clarification`,
+            id: createMessageId(
+              "clarification"
+            ),
             role: "assistant",
             text: result.message,
           },
@@ -261,12 +650,12 @@ function App() {
       setClarificationContext("");
 
       if (result.status === "no_match") {
-        setActiveResult(null);
-
         setMessages((current) => [
           ...current,
           {
-            id: `${Date.now()}-no-match`,
+            id: createMessageId(
+              "no-match"
+            ),
             role: "assistant",
             text: result.message,
           },
@@ -275,15 +664,30 @@ function App() {
         return;
       }
 
-      setActiveResult(result);
+      if (
+        result.status !==
+        "base_selection_required"
+      ) {
+        throw new Error(
+          "The backend returned an unexpected " +
+            "shopping state."
+        );
+      }
+
+      setActiveSession({
+        sessionId: result.session_id,
+        stage: "base_selection",
+      });
 
       setMessages((current) => [
         ...current,
         {
-          id: `${Date.now()}-quote`,
+          id: createMessageId(
+            "base-options"
+          ),
           role: "assistant",
           text: result.message,
-          result,
+          baseSelection: result,
         },
       ]);
     } catch (requestError) {
@@ -294,10 +698,137 @@ function App() {
     }
   }
 
-  async function handleCheckout(result) {
+  async function handleBaseSelection(
+    result,
+    product
+  ) {
+    if (
+      actionInFlightRef.current ||
+      selectionStatus !== "idle" ||
+      activeSession?.stage !==
+        "base_selection" ||
+      activeSession?.sessionId !==
+        result.session_id
+    ) {
+      return;
+    }
+
+    actionInFlightRef.current = true;
+    setError("");
+    setSelectionStatus("selecting_base");
+    setPendingSku(product.sku);
+
+    try {
+      const selectionResult =
+        await selectBaseProduct(
+          result.session_id,
+          product.sku
+        );
+
+      setActiveSession({
+        sessionId:
+          selectionResult.session_id,
+        stage: "cross_sell_decision",
+      });
+
+      setMessages((current) => [
+        ...current,
+        {
+          id: createMessageId(
+            "cross-sell-options"
+          ),
+          role: "assistant",
+          text: selectionResult.message,
+          crossSellSelection:
+            selectionResult,
+        },
+      ]);
+    } catch (selectionError) {
+      setError(selectionError.message);
+    } finally {
+      actionInFlightRef.current = false;
+      setSelectionStatus("idle");
+      setPendingSku(null);
+    }
+  }
+
+  async function handleCrossSellDecision(
+    result,
+    decision,
+    product = null
+  ) {
+    if (
+      actionInFlightRef.current ||
+      selectionStatus !== "idle" ||
+      activeSession?.stage !==
+        "cross_sell_decision" ||
+      activeSession?.sessionId !==
+        result.session_id
+    ) {
+      return;
+    }
+
+    actionInFlightRef.current = true;
+    setError("");
+    setSelectionStatus(
+      "finalizing_cross_sell"
+    );
+    setPendingSku(product?.sku ?? null);
+
+    try {
+      const quoteResult =
+        decision === "accept"
+          ? await acceptCrossSell(
+              result.session_id,
+              product.sku
+            )
+          : await declineCrossSell(
+              result.session_id
+            );
+
+      const quoteView = {
+        result: quoteResult,
+        baseProduct:
+          result.selected_base_product,
+        crossSellProduct:
+          decision === "accept"
+            ? product
+            : null,
+      };
+
+      setActiveSession({
+        sessionId: quoteResult.session_id,
+        stage: "quote_review",
+      });
+      setActiveQuote(quoteView);
+      setPaymentStatus("idle");
+
+      setMessages((current) => [
+        ...current,
+        {
+          id: createMessageId("quote"),
+          role: "assistant",
+          text: quoteResult.message,
+          quoteView,
+        },
+      ]);
+    } catch (selectionError) {
+      setError(selectionError.message);
+    } finally {
+      actionInFlightRef.current = false;
+      setSelectionStatus("idle");
+      setPendingSku(null);
+    }
+  }
+
+  async function handleCheckout(
+    quoteView
+  ) {
     if (
       paymentStatus !== "idle" ||
-      checkoutInFlightRef.current
+      checkoutInFlightRef.current ||
+      activeQuote?.result.quote.quote_id !==
+        quoteView.result.quote.quote_id
     ) {
       return;
     }
@@ -306,37 +837,55 @@ function App() {
     setError("");
 
     try {
-      setPaymentStatus("creating_order");
-
-      const checkoutOrder = await confirmCheckout(
-        result.quote.quote_id
+      setPaymentStatus(
+        "creating_order"
       );
 
-      setPaymentStatus("opening_checkout");
+      const checkoutOrder =
+        await confirmCheckout(
+          quoteView.result.quote.quote_id
+        );
+
+      setPaymentStatus(
+        "opening_checkout"
+      );
 
       const razorpayResponse =
         await openRazorpayCheckout({
           checkoutOrder,
-          productName: result.base_product.name,
+          productName:
+            quoteView.baseProduct.name,
         });
 
       setPaymentStatus("verifying");
 
-      const verifiedPayment = await verifyPayment(
-        result.quote.quote_id,
-        razorpayResponse
-      );
+      const verifiedPayment =
+        await verifyPayment(
+          quoteView.result.quote.quote_id,
+          razorpayResponse
+        );
 
       setPaymentStatus("success");
+
+      setActiveSession((current) => (
+        current
+          ? {
+              ...current,
+              stage: "payment_verified",
+            }
+          : current
+      ));
 
       setMessages((current) => [
         ...current,
         {
-          id: `${Date.now()}-success`,
+          id: createMessageId("success"),
           role: "assistant",
           text:
-            "Payment verified successfully. Payment ID: " +
-            verifiedPayment.razorpay_payment_id,
+            "Payment verified successfully. " +
+            "Payment ID: " +
+            verifiedPayment
+              .razorpay_payment_id,
           success: true,
         },
       ]);
@@ -348,6 +897,16 @@ function App() {
     }
   }
 
+  const paymentIsProcessing = ![
+    "idle",
+    "success",
+  ].includes(paymentStatus);
+
+  const inputIsDisabled =
+    isThinking ||
+    selectionStatus !== "idle" ||
+    paymentIsProcessing;
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -358,7 +917,9 @@ function App() {
 
           <span>
             <strong>VoltCart</strong>
-            <small>Powered by CartPilot</small>
+            <small>
+              Powered by CartPilot
+            </small>
           </span>
         </a>
 
@@ -381,9 +942,10 @@ function App() {
           </h1>
 
           <p>
-            Describe what you need. CartPilot searches a
-            trusted catalog, respects your budget and asks
-            before creating a payment order.
+            Describe what you need, choose your
+            product, decide whether to add an
+            optional companion, and review the
+            final quote before checkout.
           </p>
         </div>
 
@@ -394,7 +956,8 @@ function App() {
                 <h2>Shopping assistant</h2>
 
                 <p>
-                  AI understands. Code controls the money.
+                  AI understands. You choose.
+                  Code controls the money.
                 </p>
               </div>
 
@@ -407,11 +970,14 @@ function App() {
             >
               {messages.map((message) => (
                 <div
-                  className={`message ${message.role}`}
+                  className={
+                    `message ${message.role}`
+                  }
                   key={message.id}
                 >
                   <span className="avatar">
-                    {message.role === "assistant" ? (
+                    {message.role ===
+                    "assistant" ? (
                       <Bot size={17} />
                     ) : (
                       <User size={17} />
@@ -423,28 +989,99 @@ function App() {
                       <p>{message.text}</p>
                     )}
 
-                    {message.result && (
-                      <QuoteCard
-                        result={message.result}
+                    {message.baseSelection && (
+                      <BaseSelectionCard
+                        result={
+                          message.baseSelection
+                        }
                         isActive={
-                          activeResult?.quote.quote_id ===
-                          message.result.quote.quote_id
+                          activeSession?.stage ===
+                            "base_selection" &&
+                          activeSession?.sessionId ===
+                            message.baseSelection
+                              .session_id
+                        }
+                        selectionStatus={
+                          selectionStatus
+                        }
+                        pendingSku={pendingSku}
+                        onSelect={(product) =>
+                          handleBaseSelection(
+                            message.baseSelection,
+                            product
+                          )
+                        }
+                      />
+                    )}
+
+                    {message.crossSellSelection && (
+                      <CrossSellDecisionCard
+                        result={
+                          message
+                            .crossSellSelection
+                        }
+                        isActive={
+                          activeSession?.stage ===
+                            "cross_sell_decision" &&
+                          activeSession?.sessionId ===
+                            message
+                              .crossSellSelection
+                              .session_id
+                        }
+                        selectionStatus={
+                          selectionStatus
+                        }
+                        pendingSku={pendingSku}
+                        onAccept={(product) =>
+                          handleCrossSellDecision(
+                            message
+                              .crossSellSelection,
+                            "accept",
+                            product
+                          )
+                        }
+                        onDecline={() =>
+                          handleCrossSellDecision(
+                            message
+                              .crossSellSelection,
+                            "decline"
+                          )
+                        }
+                      />
+                    )}
+
+                    {message.quoteView && (
+                      <QuoteCard
+                        quoteView={
+                          message.quoteView
+                        }
+                        isActive={
+                          activeQuote?.result
+                            .quote.quote_id ===
+                          message.quoteView
+                            .result.quote.quote_id
                         }
                         paymentStatus={
-                          activeResult?.quote.quote_id ===
-                          message.result.quote.quote_id
+                          activeQuote?.result
+                            .quote.quote_id ===
+                          message.quoteView
+                            .result.quote.quote_id
                             ? paymentStatus
                             : "idle"
                         }
                         onCheckout={() =>
-                          handleCheckout(message.result)
+                          handleCheckout(
+                            message.quoteView
+                          )
                         }
                       />
                     )}
 
                     {message.success && (
                       <span className="success-label">
-                        <CheckCircle2 size={15} />
+                        <CheckCircle2
+                          size={15}
+                        />
                         Server verified
                       </span>
                     )}
@@ -483,16 +1120,24 @@ function App() {
               <textarea
                 value={input}
                 onChange={(event) =>
-                  setInput(event.target.value)
+                  setInput(
+                    event.target.value
+                  )
                 }
                 placeholder={
                   clarificationContext
-                    ? "Add the missing details…"
-                    : "Example: USB-C charger under ₹2,000"
+                    ? (
+                      "Add the missing " +
+                      "details…"
+                    )
+                    : (
+                      "Example: USB-C charger " +
+                      "under ₹2,000"
+                    )
                 }
                 maxLength={500}
                 rows={2}
-                disabled={isThinking}
+                disabled={inputIsDisabled}
                 aria-label="Shopping request"
               />
 
@@ -500,7 +1145,7 @@ function App() {
                 type="submit"
                 disabled={
                   input.trim().length < 3 ||
-                  isThinking
+                  inputIsDisabled
                 }
                 aria-label="Send shopping request"
               >
@@ -509,15 +1154,20 @@ function App() {
             </form>
 
             <div className="examples">
-              {EXAMPLE_REQUESTS.map((example) => (
-                <button
-                  type="button"
-                  key={example}
-                  onClick={() => setInput(example)}
-                >
-                  {example}
-                </button>
-              ))}
+              {EXAMPLE_REQUESTS.map(
+                (example) => (
+                  <button
+                    type="button"
+                    key={example}
+                    disabled={inputIsDisabled}
+                    onClick={() =>
+                      setInput(example)
+                    }
+                  >
+                    {example}
+                  </button>
+                )
+              )}
             </div>
           </section>
 
@@ -526,19 +1176,22 @@ function App() {
               Control layer
             </span>
 
-            <h2>Every money action is gated.</h2>
+            <h2>
+              Every money action is gated.
+            </h2>
 
             <div className="safety-item">
               <ShieldCheck />
 
               <div>
                 <strong>
-                  Bounded recommendations
+                  Buyer-selected products
                 </strong>
 
                 <p>
-                  Budget, compatibility and stock are
-                  checked by deterministic code.
+                  The backend offers bounded
+                  options, but you choose the
+                  base product.
                 </p>
               </div>
             </div>
@@ -547,11 +1200,14 @@ function App() {
               <PackageCheck />
 
               <div>
-                <strong>Trusted pricing</strong>
+                <strong>
+                  Optional cross-sells
+                </strong>
 
                 <p>
-                  Checkout amounts come from server-stored
-                  quotes, never the browser.
+                  Add-ons must be trusted,
+                  compatible, within limits, and
+                  explicitly accepted.
                 </p>
               </div>
             </div>
@@ -560,11 +1216,14 @@ function App() {
               <LockKeyhole />
 
               <div>
-                <strong>Verified payments</strong>
+                <strong>
+                  Verified payments
+                </strong>
 
                 <p>
-                  Razorpay signatures are verified before a
-                  payment is recorded.
+                  Checkout uses a linked
+                  server-stored quote, and the
+                  payment signature is verified.
                 </p>
               </div>
             </div>

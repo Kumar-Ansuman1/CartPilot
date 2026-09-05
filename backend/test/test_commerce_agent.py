@@ -1,81 +1,206 @@
-from unittest.mock import patch
+from pathlib import Path
 
-from backend.app.commerce_agent import run_commerce_agent
-from backend.app.models import ExtractedShoppingIntent
+import pytest
+
+import backend.app.commerce_agent as commerce_agent
+from backend.app.catalog import Catalog
+from backend.app.models import (
+    ExtractedShoppingIntent,
+    Product,
+)
+from backend.app.shopping_session_store import (
+    get_shopping_session,
+)
 
 
-def test_clarification_stops_before_catalog_search():
-    intent = ExtractedShoppingIntent(
-        search_query="protective phone case",
-        budget_rupees=None,
-        requested_categories=["cases"],
-        compatibility_tags=[],
-        needs_clarification=True,
-        clarification_question="What is your phone model and budget?",
+def make_product(
+    *,
+    sku: str,
+    price_paise: int,
+) -> Product:
+    return Product(
+        sku=sku,
+        name=f"USB-C Charger {sku}",
+        description="A compatible USB-C test charger.",
+        category="chargers",
+        price_paise=price_paise,
+        stock=5,
+        tags=["charger", "usb-c"],
+        compatibility_tags=["usb-c"],
+        cross_sell_skus=[],
+        active=True,
     )
 
-    with (
-        patch(
-            "backend.app.commerce_agent.extract_shopping_intent",
-            return_value=intent,
+
+def make_catalog() -> Catalog:
+    products = [
+        make_product(
+            sku="CHG-001",
+            price_paise=100_000,
         ),
-        patch(
-            "backend.app.commerce_agent.load_catalog",
-        ) as mock_load_catalog,
-    ):
-        result = run_commerce_agent("I need a phone case")
+        make_product(
+            sku="CHG-002",
+            price_paise=150_000,
+        ),
+        make_product(
+            sku="CHG-003",
+            price_paise=200_000,
+        ),
+    ]
+
+    return Catalog(
+        merchant_id="voltcart",
+        merchant_name="VoltCart",
+        catalog_version="test-v1",
+        currency="INR",
+        products={
+            product.sku: product
+            for product in products
+        },
+    )
+
+
+def complete_intent() -> ExtractedShoppingIntent:
+    return ExtractedShoppingIntent(
+        search_query="usb-c charger",
+        budget_rupees=3000,
+        requested_categories=["chargers"],
+        compatibility_tags=["usb-c"],
+        needs_clarification=False,
+        clarification_question=None,
+    )
+
+
+def clarification_intent() -> ExtractedShoppingIntent:
+    return ExtractedShoppingIntent(
+        search_query="usb-c charger",
+        budget_rupees=None,
+        requested_categories=["chargers"],
+        compatibility_tags=["usb-c"],
+        needs_clarification=True,
+        clarification_question=(
+            "What is your maximum budget?"
+        ),
+    )
+
+
+def test_stops_when_clarification_is_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        commerce_agent,
+        "extract_shopping_intent",
+        lambda _: clarification_intent(),
+    )
+
+    result = commerce_agent.run_commerce_agent(
+        "I need a USB-C charger"
+    )
 
     assert result.status == "clarification_required"
-    assert result.quote is None
-    assert result.base_product is None
-    mock_load_catalog.assert_not_called()
+    assert result.session_id is None
+    assert result.base_product_options == []
 
 
-def test_returns_no_match_when_budget_is_too_low():
-    intent = ExtractedShoppingIntent(
-        search_query="USB-C charger",
-        budget_rupees=1,
-        requested_categories=["chargers"],
-        compatibility_tags=["usb-c"],
-        needs_clarification=False,
-        clarification_question=None,
+def test_returns_no_match_without_creating_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        commerce_agent,
+        "extract_shopping_intent",
+        lambda _: complete_intent(),
+    )
+    monkeypatch.setattr(
+        commerce_agent,
+        "load_catalog",
+        make_catalog,
+    )
+    monkeypatch.setattr(
+        commerce_agent,
+        "recommend_base_products",
+        lambda **_: [],
     )
 
-    with patch(
-        "backend.app.commerce_agent.extract_shopping_intent",
-        return_value=intent,
-    ):
-        result = run_commerce_agent("USB-C charger under one rupee")
+    result = commerce_agent.run_commerce_agent(
+        "USB-C charger under 3000"
+    )
 
     assert result.status == "no_match"
-    assert result.quote is None
-    assert result.base_product is None
+    assert result.session_id is None
+    assert result.base_product_options == []
 
 
-def test_creates_quote_without_initiating_payment():
-    intent = ExtractedShoppingIntent(
-        search_query="USB-C fast charger",
-        budget_rupees=5000,
-        requested_categories=["chargers"],
-        compatibility_tags=["usb-c"],
-        needs_clarification=False,
-        clarification_question=None,
+def test_creates_session_with_three_base_options(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(
+        "CARTPILOT_DB_PATH",
+        str(tmp_path / "commerce-agent.db"),
+    )
+    monkeypatch.setattr(
+        commerce_agent,
+        "extract_shopping_intent",
+        lambda _: complete_intent(),
+    )
+    monkeypatch.setattr(
+        commerce_agent,
+        "load_catalog",
+        make_catalog,
     )
 
-    with patch(
-        "backend.app.commerce_agent.extract_shopping_intent",
-        return_value=intent,
-    ):
-        result = run_commerce_agent(
-            "I need a USB-C charger under 5000 rupees"
-        )
-
-    assert result.status == "quote_ready"
-    assert result.base_product is not None
-    assert result.quote is not None
-    assert result.quote.base_product_sku == result.base_product.sku
-    assert result.quote.total_paise <= 500000
-    assert any(
-        "Payment was not initiated" in step
-        for step in result.decision_trace
+    result = commerce_agent.run_commerce_agent(
+        "USB-C charger under 3000"
     )
+
+    assert result.status == "base_selection_required"
+    assert result.session_id is not None
+    assert len(result.base_product_options) == 3
+    assert (
+        result.recommended_base_product_sku
+        == "CHG-001"
+    )
+
+    session = get_shopping_session(
+        result.session_id
+    )
+
+    assert session is not None
+    assert session.status == "awaiting_base_selection"
+    assert session.base_product_skus == [
+        "CHG-001",
+        "CHG-002",
+        "CHG-003",
+    ]
+
+
+def test_product_options_hide_internal_catalog_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(
+        "CARTPILOT_DB_PATH",
+        str(tmp_path / "safe-options.db"),
+    )
+    monkeypatch.setattr(
+        commerce_agent,
+        "extract_shopping_intent",
+        lambda _: complete_intent(),
+    )
+    monkeypatch.setattr(
+        commerce_agent,
+        "load_catalog",
+        make_catalog,
+    )
+
+    result = commerce_agent.run_commerce_agent(
+        "USB-C charger under 3000"
+    )
+
+    serialized_option = (
+        result.base_product_options[0].model_dump()
+    )
+
+    assert "stock" not in serialized_option
+    assert "active" not in serialized_option
+    assert "cross_sell_skus" not in serialized_option
